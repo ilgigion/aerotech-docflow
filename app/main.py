@@ -1,57 +1,17 @@
-"""Точка входа FastAPI-сервиса Aerotech Docflow."""
+"""Точка входа FastAPI-приложения Aerotech Docflow."""
 
 import logging
-from datetime import date as Date
-from typing import Literal
+from uuid import uuid4
 
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+
+from app.schemas import ScanRequest, ScanResponse
+from app.service import process_scan_request
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-
-logger = logging.getLogger("aerotech-docflow")
-
-
-class ScanRequest(BaseModel):
-    """Данные, необходимые для запуска обработки документа."""
-
-    planfix_task_id: int = Field(
-        gt=0,
-        description="Идентификатор задачи Planfix",
-    )
-    doc_type: str = Field(
-        min_length=1,
-        max_length=20,
-        description="Код типа документа",
-        examples=["NKL"],
-    )
-    number: str = Field(
-        min_length=1,
-        max_length=100,
-        description="Номер документа",
-        examples=["001"],
-    )
-    date: Date = Field(
-        description="Дата документа",
-        examples=["2026-06-24"],
-    )
-    counterparty: str | None = Field(
-        default=None,
-        max_length=255,
-        description="Контрагент",
-    )
-
-
-class ScanResponse(BaseModel):
-    """Ответ на запрос запуска обработки."""
-
-    status: Literal["ok"]
-    planfix_task_id: int
-    message: str
-
 
 app = FastAPI(
     title="Aerotech Docflow",
@@ -60,32 +20,38 @@ app = FastAPI(
 )
 
 
-@app.get("/health", tags=["Состояние"])
+@app.get("/")
+async def root() -> dict[str, str]:
+    """Информация о сервисе."""
+
+    return {
+        "service": "aerotech-docflow",
+        "status": "ok",
+        "health": "/health",
+        "docs": "/docs",
+    }
+
+
+@app.get("/health")
 async def health_check() -> dict[str, str]:
-    """Проверить, что сервис запущен."""
+    """Проверка доступности приложения."""
 
     return {"status": "ok"}
 
 
-@app.post("/scan", response_model=ScanResponse, tags=["Сканирование"])
-async def start_scan(request: ScanRequest) -> ScanResponse:
+@app.post("/scan", response_model=ScanResponse)
+async def start_scan(payload: ScanRequest) -> ScanResponse:
     """Принять запрос и запустить обработку документа."""
 
-    logger.info(
-        "Получен запрос на обработку: task_id=%s, type=%s, number=%s",
-        request.planfix_task_id,
-        request.doc_type,
-        request.number,
-    )
+    request_id = uuid4()
 
-    # В следующих этапах здесь будет вызываться сервис обработки:
-    #
-    # result = await process_document(request)
-    #
-    # Пока только подтверждаем получение корректного запроса.
+    await process_scan_request(
+        request_id=request_id,
+        payload=payload,
+    )
 
     return ScanResponse(
         status="ok",
-        planfix_task_id=request.planfix_task_id,
-        message="Запрос принят",
+        request_id=request_id,
+        message="Запрос принят в обработку",
     )

@@ -16,33 +16,40 @@ from app.schemas import ScanRequest
 def repository(
     tmp_path: Path,
 ) -> JobRepository:
-    """Создать репозиторий с отдельной временной базой."""
-
-    database_path = tmp_path / "test.db"
+    """Создать репозиторий с временной SQLite-базой."""
 
     return JobRepository(
-        database_path=database_path,
+        database_path=tmp_path / "test.db",
     )
+
+
+@pytest.fixture
+def started_jobs() -> list[
+    tuple[UUID, ScanRequest]
+]:
+    """Список заданий, переданных фоновой обработке."""
+
+    return []
 
 
 @pytest.fixture
 def client(
     monkeypatch: pytest.MonkeyPatch,
     repository: JobRepository,
+    started_jobs: list[tuple[UUID, ScanRequest]],
 ) -> Iterator[TestClient]:
-    """
-    Создать HTTP-клиент с временной базой.
-
-    Фоновый процесс сканирования отключается, чтобы API-тесты
-    не ждали появления настоящего PDF.
-    """
+    """Создать тестовый HTTP-клиент."""
 
     def fake_start_scan_job(
         request_id: UUID,
         payload: ScanRequest,
     ) -> None:
-        del request_id
-        del payload
+        started_jobs.append(
+            (
+                request_id,
+                payload,
+            )
+        )
 
     monkeypatch.setattr(
         main_module,

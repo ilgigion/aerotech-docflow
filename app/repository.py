@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
@@ -9,6 +10,21 @@ from uuid import UUID, uuid4
 
 from app.config import settings
 from app.schemas import JobResponse, JobStatus, ScanRequest
+
+
+class IdempotencyConflictError(RuntimeError):
+    """
+    Один external_request_id был использован
+    для двух разных запросов.
+    """
+
+
+@dataclass(frozen=True)
+class CreateJobResult:
+    """Результат идемпотентного создания задания."""
+
+    job: JobResponse
+    created: bool
 
 
 class JobRepository:
@@ -33,7 +49,7 @@ class JobRepository:
         return connection
 
     def _initialize_database(self) -> None:
-        """Создать файл базы и таблицу заданий."""
+        """Создать базу, таблицу и выполнить простую миграцию."""
 
         self._database_path.parent.mkdir(
             parents=True,
@@ -71,6 +87,31 @@ class JobRepository:
                 """
             )
 
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(jobs)"
+                ).fetchall()
+            }
+
+            # Миграция существующей базы.
+            if "external_request_id" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE jobs
+                    ADD COLUMN external_request_id TEXT
+                    """
+                )
+
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_jobs_external_request_id
+                ON jobs(external_request_id)
+                WHERE external_request_id IS NOT NULL
+                """
+            )
+
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS
@@ -103,6 +144,7 @@ class JobRepository:
 
         return JobResponse(
             request_id=UUID(row["request_id"]),
+            external_request_id=row["external_request_id"],
             task_id=row["task_id"],
             document_type=row["document_type"],
             document_number=row["document_number"],
@@ -122,76 +164,169 @@ class JobRepository:
             error=row["error"],
         )
 
+    @staticmethod
+    def _validate_duplicate_payload(
+        existing_job: JobResponse,
+        payload: ScanRequest,
+    ) -> None:
+        """
+        Проверить, что повторный запрос содержит те же данные.
+
+        Если external_request_id тот же, а данные отличаются,
+        запрос считается конфликтующим.
+        """
+
+        is_same_request = (
+            existing_job.task_id == payload.task_id
+            and existing_job.document_type
+            == payload.document_type
+            and existing_job.document_number
+            == payload.document_number
+            and existing_job.user_code
+            == payload.user_code
+            and existing_job.context == payload.context
+        )
+
+        if not is_same_request:
+            raise IdempotencyConflictError(
+                "external_request_id уже используется "
+                "для другого набора данных"
+            )
+
+    def create_or_get(
+        self,
+        payload: ScanRequest,
+    ) -> CreateJobResult:
+        """
+        Создать задание или вернуть существующее.
+
+        Один external_request_id соответствует одному заданию.
+        """
+
+        with self._lock:
+            existing_job = self.get_by_external_request_id(
+                payload.external_request_id
+            )
+
+            if existing_job is not None:
+                self._validate_duplicate_payload(
+                    existing_job=existing_job,
+                    payload=payload,
+                )
+
+                return CreateJobResult(
+                    job=existing_job,
+                    created=False,
+                )
+
+            now = datetime.now(timezone.utc)
+
+            job = JobResponse(
+                request_id=uuid4(),
+                external_request_id=(
+                    payload.external_request_id
+                ),
+                task_id=payload.task_id,
+                document_type=payload.document_type,
+                document_number=payload.document_number,
+                user_code=payload.user_code,
+                context=payload.context,
+                status=JobStatus.ACCEPTED,
+                created_at=now,
+                updated_at=now,
+                source_file=None,
+                result_file=None,
+                result_filename=None,
+                sha256=None,
+                error=None,
+            )
+
+            try:
+                with self._connect() as connection:
+                    connection.execute(
+                        """
+                        INSERT INTO jobs (
+                            request_id,
+                            external_request_id,
+                            task_id,
+                            document_type,
+                            document_number,
+                            user_code,
+                            context_json,
+                            status,
+                            created_at,
+                            updated_at,
+                            source_file,
+                            result_file,
+                            result_filename,
+                            sha256,
+                            error
+                        )
+                        VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )
+                        """,
+                        (
+                            str(job.request_id),
+                            job.external_request_id,
+                            job.task_id,
+                            job.document_type,
+                            job.document_number,
+                            job.user_code,
+                            json.dumps(
+                                job.context,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                            job.status.value,
+                            job.created_at.isoformat(),
+                            job.updated_at.isoformat(),
+                            job.source_file,
+                            job.result_file,
+                            job.result_filename,
+                            job.sha256,
+                            job.error,
+                        ),
+                    )
+
+            except sqlite3.IntegrityError:
+                # Дополнительная защита на случай,
+                # если одинаковые запросы пришли одновременно.
+                existing_job = (
+                    self.get_by_external_request_id(
+                        payload.external_request_id
+                    )
+                )
+
+                if existing_job is None:
+                    raise
+
+                self._validate_duplicate_payload(
+                    existing_job=existing_job,
+                    payload=payload,
+                )
+
+                return CreateJobResult(
+                    job=existing_job,
+                    created=False,
+                )
+
+        return CreateJobResult(
+            job=job,
+            created=True,
+        )
+
     def create(
         self,
         payload: ScanRequest,
     ) -> JobResponse:
-        """Создать новое задание."""
+        """
+        Создать задание.
 
-        now = datetime.now(timezone.utc)
-        request_id = uuid4()
+        Метод сохранён для совместимости с существующими тестами.
+        """
 
-        job = JobResponse(
-            request_id=request_id,
-            task_id=payload.task_id,
-            document_type=payload.document_type,
-            document_number=payload.document_number,
-            user_code=payload.user_code,
-            context=payload.context,
-            status=JobStatus.ACCEPTED,
-            created_at=now,
-            updated_at=now,
-            source_file=None,
-            result_file=None,
-            result_filename=None,
-            sha256=None,
-            error=None,
-        )
-
-        with self._lock:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO jobs (
-                        request_id,
-                        task_id,
-                        document_type,
-                        document_number,
-                        user_code,
-                        context_json,
-                        status,
-                        created_at,
-                        updated_at,
-                        source_file,
-                        result_file,
-                        result_filename,
-                        sha256,
-                        error
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(job.request_id),
-                        job.task_id,
-                        job.document_type,
-                        job.document_number,
-                        job.user_code,
-                        json.dumps(
-                            job.context,
-                            ensure_ascii=False,
-                        ),
-                        job.status.value,
-                        job.created_at.isoformat(),
-                        job.updated_at.isoformat(),
-                        job.source_file,
-                        job.result_file,
-                        job.result_filename,
-                        job.sha256,
-                        job.error,
-                    ),
-                )
-
-        return job
+        return self.create_or_get(payload).job
 
     def get(
         self,
@@ -209,6 +344,30 @@ class JobRepository:
                     """,
                     (
                         str(request_id),
+                    ),
+                ).fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_job(row)
+
+    def get_by_external_request_id(
+        self,
+        external_request_id: str,
+    ) -> JobResponse | None:
+        """Найти задание по ID внешнего запроса."""
+
+        with self._lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT *
+                    FROM jobs
+                    WHERE external_request_id = ?
+                    """,
+                    (
+                        external_request_id,
                     ),
                 ).fetchone()
 
@@ -356,12 +515,7 @@ class JobRepository:
     def mark_interrupted_jobs_failed(
         self,
     ) -> int:
-        """
-        Завершить задания, прерванные перезапуском сервиса.
-
-        Автоматически продолжать ожидание сканера после перезапуска
-        пока небезопасно, поэтому такие задания помечаются как failed.
-        """
+        """Пометить прерванные задания как failed."""
 
         interrupted_statuses = (
             JobStatus.ACCEPTED.value,

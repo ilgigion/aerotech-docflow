@@ -1,18 +1,22 @@
 """Точка входа FastAPI-приложения Aerotech Docflow."""
 
 import logging
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from uuid import UUID
 
 from fastapi import (
     FastAPI,
     HTTPException,
     Query,
+    Response,
     status,
 )
 
-from app.repository import job_repository
+from app.repository import (
+    IdempotencyConflictError,
+    job_repository,
+)
 from app.schemas import (
     JobResponse,
     ScanAcceptedResponse,
@@ -49,21 +53,17 @@ async def lifespan(
             interrupted_jobs,
         )
 
-    logger.info(
-        "Aerotech Docflow запущен"
-    )
+    logger.info("Aerotech Docflow запущен")
 
     yield
 
-    logger.info(
-        "Aerotech Docflow остановлен"
-    )
+    logger.info("Aerotech Docflow остановлен")
 
 
 app = FastAPI(
     title="Aerotech Docflow",
     description="Backend-сервис обработки документов",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -97,25 +97,59 @@ async def health_check() -> dict[str, str]:
 )
 async def start_scan(
     payload: ScanRequest,
+    response: Response,
 ) -> ScanAcceptedResponse:
-    """Создать задание и начать ожидание PDF."""
+    """Идемпотентно создать задание на сканирование."""
 
-    job = job_repository.create(payload)
+    try:
+        creation_result = (
+            job_repository.create_or_get(payload)
+        )
 
-    start_scan_job(
-        request_id=job.request_id,
-        payload=payload,
-    )
+    except IdempotencyConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
 
-    logger.info(
-        "Создано задание: request_id=%s task_id=%s",
-        job.request_id,
-        job.task_id,
-    )
+    job = creation_result.job
+
+    if creation_result.created:
+        start_scan_job(
+            request_id=job.request_id,
+            payload=payload,
+        )
+
+        logger.info(
+            "Создано задание: "
+            "request_id=%s external_request_id=%s task_id=%s",
+            job.request_id,
+            payload.external_request_id,
+            job.task_id,
+        )
+
+        response.status_code = (
+            status.HTTP_202_ACCEPTED
+        )
+
+        response_status = "accepted"
+
+    else:
+        logger.info(
+            "Получен повторный запрос: "
+            "request_id=%s external_request_id=%s",
+            job.request_id,
+            payload.external_request_id,
+        )
+
+        response.status_code = status.HTTP_200_OK
+        response_status = "existing"
 
     return ScanAcceptedResponse(
-        status="accepted",
+        status=response_status,
+        created=creation_result.created,
         request_id=job.request_id,
+        job_status=job.status,
         status_url=f"/jobs/{job.request_id}",
     )
 

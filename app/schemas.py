@@ -22,6 +22,16 @@ class JobStatus(str, Enum):
 class ScanRequest(BaseModel):
     """JSON, который приходит в POST /scan."""
 
+    external_request_id: str = Field(
+        min_length=1,
+        max_length=128,
+        description=(
+            "Уникальный идентификатор запроса внешней системы. "
+            "Повторный запрос с тем же значением не создаёт новое задание."
+        ),
+        examples=["planfix-scan-52418-001"],
+    )
+
     task_id: int = Field(
         gt=0,
         description="Идентификатор задачи во внешней системе",
@@ -56,10 +66,13 @@ class ScanRequest(BaseModel):
 
 
 class ScanAcceptedResponse(BaseModel):
-    """Ответ после принятия POST /scan."""
+    """Ответ на POST /scan."""
 
-    status: Literal["accepted"]
+    status: Literal["accepted", "existing"]
+    created: bool
+
     request_id: UUID
+    job_status: JobStatus
     status_url: str
 
 
@@ -67,8 +80,11 @@ class JobResponse(BaseModel):
     """Текущее состояние задания."""
 
     request_id: UUID
-    task_id: int
 
+    # У старых записей, созданных до миграции, значение будет None.
+    external_request_id: str | None
+
+    task_id: int
     document_type: str
     document_number: str
     user_code: str

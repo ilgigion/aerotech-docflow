@@ -11,11 +11,25 @@ import secrets
 import subprocess
 import time
 
+
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class EnvironmentCheck:
+    name: str
+    ok: bool
+    message: str
+    details: str = ""
+
+
 class ScannerError(RuntimeError):
-    """Базовая ошибка сканирования."""
+    """
+    Базовая ошибка сканера.
+
+    operator_message — понятное сообщение для оператора.
+    technical_message — подробности для логов/администратора.
+    """
 
     def __init__(
         self,
@@ -28,6 +42,7 @@ class ScannerError(RuntimeError):
         return_code: int | None = None,
     ):
         super().__init__(operator_message)
+
         self.code = code
         self.operator_message = operator_message
         self.technical_message = technical_message
@@ -60,6 +75,10 @@ class ScannerIncomingDirectoryError(ScannerError):
 
 
 class ScannerInvalidTaskIdError(ScannerError):
+    pass
+
+
+class ScannerInvalidSettingsError(ScannerError):
     pass
 
 
@@ -96,17 +115,18 @@ class ScannerSettings:
     """
     Настройки сканера.
 
-    Основной режим сейчас — запуск через профиль NAPS2.
-    Профиль хранит рабочие настройки драйвера, устройства, источника, DPI и цвета.
+    Если profile_name указан, используется команда:
+        NAPS2.Console.exe -o output.pdf -p ProfileName
+
+    Если profile_name=None, используется команда:
+        NAPS2.Console.exe -o output.pdf --noprofile --driver ... --device ...
     """
 
-    naps2_executable: Path | str = Path(r"C:\Program Files\NAPS2\NAPS2.Console.exe")
-    incoming_dir: Path | str = Path(r"D:\incoming")
+    naps2_executable: Path = Path(r"C:\Program Files\NAPS2\NAPS2.Console.exe")
+    incoming_dir: Path = Path(r"D:\incoming")
 
-    # Точное имя профиля в NAPS2. Например: "CanonG600".
-    profile_name: str | None = "CanonG600"
+    profile_name: str | None = None
 
-    # Используется только если profile_name = None.
     driver: str = "twain"
     device_name: str = "Canon G600 series Network"
     source: str | None = None
@@ -116,18 +136,13 @@ class ScannerSettings:
 
     timeout_seconds: int = 120
     min_pdf_size_bytes: int = 100
+
     stable_checks: int = 2
     stable_interval_seconds: float = 0.5
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "naps2_executable", Path(self.naps2_executable))
-        object.__setattr__(self, "incoming_dir", Path(self.incoming_dir))
-
 
 def load_settings_from_env() -> ScannerSettings:
-    """Загрузить настройки из переменных окружения."""
-
-    profile_name = os.getenv("NAPS2_PROFILE", "CanonG600").strip()
+    profile_name = os.getenv("NAPS2_PROFILE", "").strip()
     if profile_name == "":
         profile_name = None
 
@@ -135,42 +150,100 @@ def load_settings_from_env() -> ScannerSettings:
     if source == "":
         source = None
 
-    dpi = os.getenv("SCANNER_DPI", "").strip()
-    page_size = os.getenv("SCANNER_PAGE_SIZE", "").strip()
-    bit_depth = os.getenv("SCANNER_BIT_DEPTH", "").strip()
+    dpi_value = os.getenv("SCANNER_DPI", "").strip()
+    page_size = os.getenv("SCANNER_PAGE_SIZE", "").strip() or None
+    bit_depth = os.getenv("SCANNER_BIT_DEPTH", "").strip() or None
 
     return ScannerSettings(
-        naps2_executable=os.getenv(
-            "NAPS2_EXECUTABLE",
-            r"C:\Program Files\NAPS2\NAPS2.Console.exe",
+        naps2_executable=Path(
+            os.getenv(
+                "NAPS2_EXECUTABLE",
+                r"C:\Program Files\NAPS2\NAPS2.Console.exe",
+            )
         ),
-        incoming_dir=os.getenv("SCANNER_INCOMING_DIR", r"D:\incoming"),
+        incoming_dir=Path(os.getenv("SCANNER_INCOMING_DIR", r"D:\incoming")),
         profile_name=profile_name,
         driver=os.getenv("SCANNER_DRIVER", "twain"),
         device_name=os.getenv("SCANNER_DEVICE_NAME", "Canon G600 series Network"),
         source=source,
-        dpi=int(dpi) if dpi else None,
-        page_size=page_size or None,
-        bit_depth=bit_depth or None,
+        dpi=int(dpi_value) if dpi_value else None,
+        page_size=page_size,
+        bit_depth=bit_depth,
         timeout_seconds=int(os.getenv("SCANNER_TIMEOUT_SECONDS", "120")),
         min_pdf_size_bytes=int(os.getenv("SCANNER_MIN_PDF_SIZE_BYTES", "100")),
     )
 
 
-def prepare_environment(settings: ScannerSettings) -> None:
-    """Проверить, что NAPS2 существует и во временную папку можно писать."""
+def validate_scanner_settings(settings: ScannerSettings) -> None:
+    if settings.timeout_seconds <= 0:
+        raise ScannerInvalidSettingsError(
+            code="invalid_scanner_timeout",
+            operator_message="Некорректный таймаут сканирования. Обратитесь к администратору.",
+            technical_message=f"timeout_seconds={settings.timeout_seconds}",
+        )
 
-    if not settings.naps2_executable.is_file():
+    if settings.min_pdf_size_bytes <= 0:
+        raise ScannerInvalidSettingsError(
+            code="invalid_min_pdf_size",
+            operator_message="Некорректная настройка минимального размера PDF. Обратитесь к администратору.",
+            technical_message=f"min_pdf_size_bytes={settings.min_pdf_size_bytes}",
+        )
+
+    if settings.stable_checks <= 0:
+        raise ScannerInvalidSettingsError(
+            code="invalid_stable_checks",
+            operator_message="Некорректная настройка проверки файла. Обратитесь к администратору.",
+            technical_message=f"stable_checks={settings.stable_checks}",
+        )
+
+    if settings.stable_interval_seconds <= 0:
+        raise ScannerInvalidSettingsError(
+            code="invalid_stable_interval",
+            operator_message="Некорректная настройка проверки файла. Обратитесь к администратору.",
+            technical_message=f"stable_interval_seconds={settings.stable_interval_seconds}",
+        )
+
+    if settings.profile_name:
+        return
+
+    if not settings.driver or not str(settings.driver).strip():
+        raise ScannerInvalidSettingsError(
+            code="empty_scanner_driver",
+            operator_message="Не указан драйвер сканера. Обратитесь к администратору.",
+            technical_message="driver is empty and profile_name is not set",
+        )
+
+    if not settings.device_name or not str(settings.device_name).strip():
+        raise ScannerInvalidSettingsError(
+            code="empty_scanner_device",
+            operator_message="Не указано имя сканера. Обратитесь к администратору.",
+            technical_message="device_name is empty and profile_name is not set",
+        )
+
+
+def prepare_environment(settings: ScannerSettings) -> None:
+    """
+    Проверяем, что NAPS2 существует и что во временную папку можно писать.
+    """
+
+    validate_scanner_settings(settings)
+
+    if not Path(settings.naps2_executable).is_file():
         raise ScannerExecutableNotFoundError(
             code="naps2_not_found",
             operator_message="Не найден NAPS2.Console.exe. Обратитесь к администратору.",
             technical_message=f"File not found: {settings.naps2_executable}",
         )
 
-    try:
-        settings.incoming_dir.mkdir(parents=True, exist_ok=True)
+    incoming_dir = Path(settings.incoming_dir)
 
-        test_file = settings.incoming_dir / ".scanner_write_test.tmp"
+    try:
+        if incoming_dir.exists() and not incoming_dir.is_dir():
+            raise OSError(f"Incoming path exists but is not a directory: {incoming_dir}")
+
+        incoming_dir.mkdir(parents=True, exist_ok=True)
+
+        test_file = incoming_dir / ".scanner_write_test.tmp"
         test_file.write_text("ok", encoding="utf-8")
         test_file.unlink(missing_ok=True)
 
@@ -182,14 +255,47 @@ def prepare_environment(settings: ScannerSettings) -> None:
         ) from exc
 
 
+def check_scanner_environment(settings: ScannerSettings) -> list[EnvironmentCheck]:
+    """
+    Диагностика окружения сканера без запуска сканирования.
+    """
+
+    checks: list[EnvironmentCheck] = []
+
+    try:
+        validate_scanner_settings(settings)
+        checks.append(EnvironmentCheck("settings", True, "Настройки сканера корректны"))
+    except ScannerError as exc:
+        checks.append(EnvironmentCheck("settings", False, exc.operator_message, exc.technical_message))
+
+    naps2_path = Path(settings.naps2_executable)
+    checks.append(
+        EnvironmentCheck(
+            "naps2_executable",
+            naps2_path.is_file(),
+            "NAPS2.Console.exe найден" if naps2_path.is_file() else "NAPS2.Console.exe не найден",
+            str(naps2_path),
+        )
+    )
+
+    incoming_dir = Path(settings.incoming_dir)
+    try:
+        if incoming_dir.exists() and not incoming_dir.is_dir():
+            raise OSError(f"Path exists but is not a directory: {incoming_dir}")
+
+        incoming_dir.mkdir(parents=True, exist_ok=True)
+        test_file = incoming_dir / ".scanner_write_test.tmp"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink(missing_ok=True)
+        checks.append(EnvironmentCheck("incoming_dir", True, "Временная папка доступна на запись", str(incoming_dir)))
+
+    except OSError as exc:
+        checks.append(EnvironmentCheck("incoming_dir", False, "Временная папка недоступна на запись", str(exc)))
+
+    return checks
+
+
 def build_output_path(task_id: int | str, incoming_dir: Path) -> Path:
-    """
-    Создать уникальный путь для временного PDF.
-
-    Пример:
-    D:\\incoming\\PF_TEST_001_20260714_154412_a1b2c3.pdf
-    """
-
     raw_task_id = str(task_id).strip()
 
     if not raw_task_id:
@@ -199,7 +305,7 @@ def build_output_path(task_id: int | str, incoming_dir: Path) -> Path:
             technical_message="task_id is empty",
         )
 
-    safe_task_id = re.sub(r"[^A-Za-zА-Яа-я0-9_-]+", "_", raw_task_id).strip("_")
+    safe_task_id = re.sub(r"[^A-Za-z0-9_-]+", "_", raw_task_id).strip("_")
 
     if not safe_task_id:
         raise ScannerInvalidTaskIdError(
@@ -211,12 +317,10 @@ def build_output_path(task_id: int | str, incoming_dir: Path) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(3)
 
-    return incoming_dir / f"PF_{safe_task_id}_{timestamp}_{suffix}.pdf"
+    return Path(incoming_dir) / f"PF_{safe_task_id}_{timestamp}_{suffix}.pdf"
 
 
 def build_naps2_command(settings: ScannerSettings, output_path: Path) -> list[str]:
-    """Собрать команду запуска NAPS2."""
-
     command = [
         str(settings.naps2_executable),
         "-o",
@@ -239,26 +343,31 @@ def build_naps2_command(settings: ScannerSettings, output_path: Path) -> list[st
 
     if settings.source:
         command.extend(["--source", settings.source])
+
     if settings.dpi:
         command.extend(["--dpi", str(settings.dpi)])
+
     if settings.page_size:
         command.extend(["--pagesize", settings.page_size])
+
     if settings.bit_depth:
         command.extend(["--bitdepth", settings.bit_depth])
 
     return command
 
 
-def _console_encoding() -> str:
+def _get_console_encoding() -> str:
     return locale.getpreferredencoding(False) or "utf-8"
 
 
-def _text(value: str | bytes | None) -> str:
+def _to_text(value: str | bytes | None) -> str:
     if value is None:
         return ""
+
     if isinstance(value, bytes):
-        return value.decode(_console_encoding(), errors="replace")
-    return value
+        return value.decode(_get_console_encoding(), errors="replace")
+
+    return str(value)
 
 
 def classify_naps2_error(
@@ -267,8 +376,6 @@ def classify_naps2_error(
     output_path: Path,
     return_code: int | None,
 ) -> ScannerError | None:
-    """Распознать типовые ошибки NAPS2/Canon."""
-
     combined = f"{stdout}\n{stderr}".lower()
 
     if "no scanned pages" in combined:
@@ -304,6 +411,17 @@ def classify_naps2_error(
             return_code=return_code,
         )
 
+    if "device not found" in combined or "scanner not found" in combined or "устройство не найден" in combined:
+        return ScannerConnectionError(
+            code="scanner_not_found",
+            operator_message="Сканер не найден. Проверьте имя устройства, подключение и сеть.",
+            technical_message="NAPS2/driver reported scanner not found",
+            output_path=output_path,
+            stdout=stdout,
+            stderr=stderr,
+            return_code=return_code,
+        )
+
     if (
         "busy" in combined
         or "занят" in combined
@@ -323,33 +441,58 @@ def classify_naps2_error(
     return None
 
 
-def run_naps2(command: list[str], settings: ScannerSettings, output_path: Path) -> None:
-    """Запустить NAPS2.Console.exe и дождаться завершения."""
+def run_naps2(
+    command: list[str],
+    settings: ScannerSettings,
+    output_path: Path,
+    operation_id: str | None = None,
+) -> None:
+    logger.info(
+        "Starting NAPS2 scan operation_id=%s output_path=%s command=%s",
+        operation_id,
+        output_path,
+        command,
+    )
 
-    logger.info("Запуск NAPS2: %s", command)
+    started_at = time.monotonic()
 
     try:
         completed = subprocess.run(
             command,
             capture_output=True,
             text=True,
-            encoding=_console_encoding(),
+            encoding=_get_console_encoding(),
             errors="replace",
             timeout=settings.timeout_seconds,
             check=False,
         )
 
     except subprocess.TimeoutExpired as exc:
+        stdout = _to_text(exc.stdout)
+        stderr = _to_text(exc.stderr)
+        duration_seconds = round(time.monotonic() - started_at, 3)
+
+        logger.error(
+            "NAPS2 timeout operation_id=%s duration_seconds=%s output_path=%s stdout=%r stderr=%r",
+            operation_id,
+            duration_seconds,
+            output_path,
+            stdout,
+            stderr,
+        )
+
         raise ScannerTimeoutError(
             code="scanner_timeout",
             operator_message=f"Сканирование не завершилось за {settings.timeout_seconds} секунд. Возможно, драйвер ждёт действие оператора или сканер не отвечает.",
             technical_message=f"NAPS2 timeout after {settings.timeout_seconds} seconds",
             output_path=output_path,
-            stdout=_text(exc.stdout),
-            stderr=_text(exc.stderr),
+            stdout=stdout,
+            stderr=stderr,
         ) from exc
 
     except OSError as exc:
+        logger.exception("NAPS2 launch error operation_id=%s output_path=%s", operation_id, output_path)
+
         raise ScannerProcessError(
             code="naps2_launch_error",
             operator_message="Не удалось запустить программу сканирования. Обратитесь к администратору.",
@@ -357,8 +500,19 @@ def run_naps2(command: list[str], settings: ScannerSettings, output_path: Path) 
             output_path=output_path,
         ) from exc
 
+    duration_seconds = round(time.monotonic() - started_at, 3)
     stdout = completed.stdout or ""
     stderr = completed.stderr or ""
+
+    logger.info(
+        "NAPS2 finished operation_id=%s return_code=%s duration_seconds=%s output_path=%s stdout=%r stderr=%r",
+        operation_id,
+        completed.returncode,
+        duration_seconds,
+        output_path,
+        stdout,
+        stderr,
+    )
 
     known_error = classify_naps2_error(
         stdout=stdout,
@@ -366,6 +520,7 @@ def run_naps2(command: list[str], settings: ScannerSettings, output_path: Path) 
         output_path=output_path,
         return_code=completed.returncode,
     )
+
     if known_error:
         raise known_error
 
@@ -380,8 +535,6 @@ def run_naps2(command: list[str], settings: ScannerSettings, output_path: Path) 
             return_code=completed.returncode,
         )
 
-    logger.info("NAPS2 завершился успешно")
-
 
 def wait_until_file_is_stable(
     path: Path,
@@ -389,8 +542,6 @@ def wait_until_file_is_stable(
     interval_seconds: float,
     max_wait_seconds: float = 10,
 ) -> None:
-    """Подождать, пока PDF перестанет изменяться по размеру."""
-
     deadline = time.monotonic() + max_wait_seconds
     last_size: int | None = None
     stable_count = 0
@@ -401,6 +552,7 @@ def wait_until_file_is_stable(
 
             if current_size > 0 and current_size == last_size:
                 stable_count += 1
+
                 if stable_count >= required_checks:
                     return
             else:
@@ -411,8 +563,6 @@ def wait_until_file_is_stable(
 
 
 def validate_pdf_output(output_path: Path, settings: ScannerSettings) -> None:
-    """Проверить, что NAPS2 создал нормальный PDF."""
-
     wait_until_file_is_stable(
         path=output_path,
         required_checks=settings.stable_checks,
@@ -436,6 +586,7 @@ def validate_pdf_output(output_path: Path, settings: ScannerSettings) -> None:
         )
 
     file_size = output_path.stat().st_size
+
     if file_size < settings.min_pdf_size_bytes:
         raise ScannerOutputInvalidError(
             code="output_too_small",
@@ -459,22 +610,18 @@ def validate_pdf_output(output_path: Path, settings: ScannerSettings) -> None:
 def scan_document(
     task_id: int | str,
     settings: ScannerSettings | None = None,
+    operation_id: str | None = None,
 ) -> Path:
-    """
-    Главная функция модуля сканера.
-
-    На вход: task_id.
-    На выход: путь к созданному PDF.
-    """
-
     if settings is None:
         settings = load_settings_from_env()
+
+    logger.info("Scan requested operation_id=%s task_id=%s", operation_id, task_id)
 
     prepare_environment(settings)
 
     output_path = build_output_path(
         task_id=task_id,
-        incoming_dir=settings.incoming_dir,
+        incoming_dir=Path(settings.incoming_dir),
     )
 
     command = build_naps2_command(
@@ -486,6 +633,7 @@ def scan_document(
         command=command,
         settings=settings,
         output_path=output_path,
+        operation_id=operation_id,
     )
 
     validate_pdf_output(
@@ -493,5 +641,6 @@ def scan_document(
         settings=settings,
     )
 
-    logger.info("Сканирование завершено: %s", output_path)
+    logger.info("Scan completed operation_id=%s task_id=%s output_path=%s", operation_id, task_id, output_path)
+
     return output_path

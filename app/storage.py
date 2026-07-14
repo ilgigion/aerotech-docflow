@@ -3,15 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import logging
 import os
 import shutil
 
-from app.naming import (
-    NamingError,
-    build_document_filename,
-    normalize_doc_type,
-    parse_document_datetime,
-)
+from app.naming import build_document_filename, normalize_doc_type, parse_document_datetime
+from app.scanner import EnvironmentCheck
+
+
+logger = logging.getLogger(__name__)
+
+MAX_FULL_PATH_LENGTH_WARNING = 240
 
 
 class StorageError(RuntimeError):
@@ -56,7 +58,7 @@ class SourcePathNotFileError(StorageError):
     pass
 
 
-class ArchiveRootMissingError(StorageError):
+class ArchiveRootError(StorageError):
     pass
 
 
@@ -64,18 +66,20 @@ class FileMoveError(StorageError):
     pass
 
 
+class DestinationPathError(StorageError):
+    pass
+
+
 @dataclass(frozen=True)
 class StorageSettings:
     """
-    Настройки архива.
-
     archive_root — корневая папка архива.
 
     Пример:
-        D:\\archive_test
+        D:\archive_test
 
-    Тогда итоговый путь будет:
-        D:\\archive_test\\2026\\УПД\\УПД_260710_101025_2455B.pdf
+    Итоговый путь:
+        D:\archive_test\2026\УПД\УПД_260710_101025_2455B.pdf
     """
 
     archive_root: Path = Path(r"D:\archive_test")
@@ -83,31 +87,17 @@ class StorageSettings:
 
 @dataclass(frozen=True)
 class StoredDocument:
-    """
-    Результат переноса файла в архив.
-    """
-
     file_name: str
     file_path: Path
 
 
 def load_storage_settings_from_env() -> StorageSettings:
-    """
-    Позже будем брать путь архива из .env.
-
-    Сейчас можно передавать StorageSettings вручную.
-    """
-
     return StorageSettings(
         archive_root=Path(os.getenv("ARCHIVE_ROOT", r"D:\archive_test"))
     )
 
 
 def validate_source_file(source_path: Path) -> None:
-    """
-    Проверяем, что временный PDF существует.
-    """
-
     if not source_path.exists():
         raise SourceFileMissingError(
             code="source_file_missing",
@@ -130,37 +120,29 @@ def build_archive_directory(
     doc_type: str,
     document_datetime: datetime | str,
 ) -> Path:
-    """
-    Формирует папку назначения:
-
-        archive_root / ГОД / ТИП
-
-    Пример:
-
-        D:\\archive_test\\2026\\УПД
-    """
-
     parsed_datetime = parse_document_datetime(document_datetime)
     normalized_doc_type = normalize_doc_type(doc_type)
 
     year = parsed_datetime.strftime("%Y")
 
-    return archive_root / year / normalized_doc_type
+    return Path(archive_root) / year / normalized_doc_type
 
 
 def ensure_archive_directory(destination_dir: Path, archive_root: Path) -> None:
     """
-    Проверяем корень архива и автоматически создаём папку назначения:
+    Проверяет корень архива и автоматически создаёт папку назначения:
 
         archive_root / ГОД / ТИП
 
-    Например:
-
-        D:\\archive_test\\2026\\УПД
+    По текущему решению archive_root тоже создаётся автоматически.
+    Для боевого режима позже можно сделать строже: корень должен существовать заранее.
     """
 
+    archive_root = Path(archive_root)
+    destination_dir = Path(destination_dir)
+
     if archive_root.exists() and not archive_root.is_dir():
-        raise ArchiveRootMissingError(
+        raise ArchiveRootError(
             code="archive_root_not_directory",
             operator_message="Путь архива некорректен.",
             technical_message=f"Archive root is not a directory: {archive_root}",
@@ -169,7 +151,6 @@ def ensure_archive_directory(destination_dir: Path, archive_root: Path) -> None:
 
     try:
         destination_dir.mkdir(parents=True, exist_ok=True)
-
     except OSError as exc:
         raise FileMoveError(
             code="archive_directory_create_error",
@@ -179,24 +160,66 @@ def ensure_archive_directory(destination_dir: Path, archive_root: Path) -> None:
         ) from exc
 
     if not destination_dir.is_dir():
-        raise FileMoveError(
+        raise DestinationPathError(
             code="archive_destination_not_directory",
             operator_message="Путь назначения в архиве некорректен.",
             technical_message=f"Destination path is not a directory: {destination_dir}",
             destination_path=destination_dir,
         )
 
+    try:
+        test_file = destination_dir / ".archive_write_test.tmp"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink(missing_ok=True)
+    except OSError as exc:
+        raise FileMoveError(
+            code="archive_directory_not_writable",
+            operator_message="Нет доступа на запись в папку архива.",
+            technical_message=str(exc),
+            destination_path=destination_dir,
+        ) from exc
+
+
+def check_storage_environment(settings: StorageSettings) -> list[EnvironmentCheck]:
+    """
+    Диагностика архива без переноса документа.
+    """
+
+    checks: list[EnvironmentCheck] = []
+    archive_root = Path(settings.archive_root)
+
+    if archive_root.exists() and not archive_root.is_dir():
+        checks.append(
+            EnvironmentCheck(
+                "archive_root",
+                False,
+                "Путь архива существует, но это не папка",
+                str(archive_root),
+            )
+        )
+        return checks
+
+    try:
+        archive_root.mkdir(parents=True, exist_ok=True)
+        test_file = archive_root / ".archive_root_write_test.tmp"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink(missing_ok=True)
+        checks.append(EnvironmentCheck("archive_root", True, "Корневая папка архива доступна", str(archive_root)))
+    except OSError as exc:
+        checks.append(EnvironmentCheck("archive_root", False, "Корневая папка архива недоступна", str(exc)))
+
+    return checks
+
 
 def build_unique_destination_path(destination_dir: Path, file_name: str) -> Path:
-    """
-    Если файл с таким именем уже есть, добавляем суффикс:
+    destination_path = Path(destination_dir) / file_name
 
-        УПД_260710_101025_2455B.pdf
-        УПД_260710_101025_2455B_01.pdf
-        УПД_260710_101025_2455B_02.pdf
-    """
-
-    destination_path = destination_dir / file_name
+    if len(str(destination_path)) > MAX_FULL_PATH_LENGTH_WARNING:
+        logger.warning(
+            "Destination path is long length=%s path=%s",
+            len(str(destination_path)),
+            destination_path,
+        )
 
     if not destination_path.exists():
         return destination_path
@@ -205,7 +228,7 @@ def build_unique_destination_path(destination_dir: Path, file_name: str) -> Path
     suffix = destination_path.suffix
 
     for index in range(1, 100):
-        candidate = destination_dir / f"{stem}_{index:02d}{suffix}"
+        candidate = Path(destination_dir) / f"{stem}_{index:02d}{suffix}"
 
         if not candidate.exists():
             return candidate
@@ -218,17 +241,31 @@ def build_unique_destination_path(destination_dir: Path, file_name: str) -> Path
     )
 
 
-def move_file(source_path: Path, destination_path: Path) -> None:
+def move_file(source_path: Path, destination_path: Path, operation_id: str | None = None) -> None:
     """
-    Переносим файл.
+    Переносит файл.
 
-    shutil.move работает и внутри одного диска, и между разными дисками.
+    Пока используем shutil.move — это простая версия.
+    Более безопасный .tmp-перенос добавим отдельным средним улучшением.
     """
+
+    logger.info(
+        "Moving file operation_id=%s source_path=%s destination_path=%s",
+        operation_id,
+        source_path,
+        destination_path,
+    )
 
     try:
         shutil.move(str(source_path), str(destination_path))
-
     except OSError as exc:
+        logger.exception(
+            "File move failed operation_id=%s source_path=%s destination_path=%s",
+            operation_id,
+            source_path,
+            destination_path,
+        )
+
         raise FileMoveError(
             code="file_move_error",
             operator_message="Не удалось перенести файл в архив.",
@@ -244,6 +281,7 @@ def store_document(
     document_datetime: datetime | str,
     document_number: str,
     settings: StorageSettings | None = None,
+    operation_id: str | None = None,
 ) -> StoredDocument:
     """
     Главная функция storage.py.
@@ -263,6 +301,16 @@ def store_document(
 
     source_path = Path(source_path)
 
+    logger.info(
+        "Store document requested operation_id=%s source_path=%s doc_type=%s document_datetime=%s document_number=%s archive_root=%s",
+        operation_id,
+        source_path,
+        doc_type,
+        document_datetime,
+        document_number,
+        settings.archive_root,
+    )
+
     validate_source_file(source_path)
 
     file_name = build_document_filename(
@@ -272,14 +320,14 @@ def store_document(
     )
 
     destination_dir = build_archive_directory(
-        archive_root=settings.archive_root,
+        archive_root=Path(settings.archive_root),
         doc_type=doc_type,
         document_datetime=document_datetime,
     )
 
     ensure_archive_directory(
         destination_dir=destination_dir,
-        archive_root=settings.archive_root,
+        archive_root=Path(settings.archive_root),
     )
 
     destination_path = build_unique_destination_path(
@@ -290,6 +338,14 @@ def store_document(
     move_file(
         source_path=source_path,
         destination_path=destination_path,
+        operation_id=operation_id,
+    )
+
+    logger.info(
+        "Store document completed operation_id=%s file_name=%s file_path=%s",
+        operation_id,
+        destination_path.name,
+        destination_path,
     )
 
     return StoredDocument(

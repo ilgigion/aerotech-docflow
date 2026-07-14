@@ -9,7 +9,6 @@ from app.storage import StorageError, StorageSettings, store_document
 source_path = Path(r"D:\incoming\STORAGE_TEST_SOURCE.pdf")
 archive_root = Path(r"D:\archive_test")
 
-# Готовим тестовый временный PDF.
 source_path.parent.mkdir(parents=True, exist_ok=True)
 source_path.write_bytes(b"%PDF-1.4\n% test pdf\n")
 
@@ -22,7 +21,6 @@ settings = StorageSettings(
     archive_root=archive_root,
 )
 
-
 try:
     result = store_document(
         source_path=source_path,
@@ -30,6 +28,7 @@ try:
         document_datetime=datetime(2026, 7, 10, 10, 10, 25),
         document_number="2455B",
         settings=settings,
+        operation_id="TEST_STORAGE_001",
     )
 
     print()

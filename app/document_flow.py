@@ -6,9 +6,16 @@ from pathlib import Path
 import logging
 import secrets
 
+from app.locks import ScannerLockError, ScannerLockSettings, scanner_lock
 from app.naming import NamingError, build_document_filename
-from app.scanner import ScannerError, ScannerSettings, scan_document
-from app.storage import StorageError, StorageSettings, StoredDocument, build_archive_directory, ensure_archive_directory, store_document
+from app.scanner import ScannerError, ScannerSettings, load_settings_from_env, scan_document
+from app.storage import (
+    StorageError,
+    StorageSettings,
+    StoredDocument,
+    load_storage_settings_from_env,
+    store_document,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -16,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ProcessedDocument:
+    """
+    Итог полного процесса сканирования и сохранения.
+    """
+
     task_id: str
     operation_id: str
     temp_scan_path: Path
@@ -26,41 +37,24 @@ class ProcessedDocument:
 @dataclass(frozen=True)
 class DocumentProcessResult:
     """
-    Единый результат процесса для будущего FastAPI/Planfix.
+    Безопасный результат для будущего FastAPI/Planfix.
 
     success=True:
-        file_name и file_path заполнены.
+        result содержит ProcessedDocument.
 
     success=False:
-        stage, error_code, operator_message и technical_message объясняют ошибку.
+        stage, error_code, operator_message и technical_message
+        описывают ошибку.
     """
 
     success: bool
-    stage: str
     operation_id: str
-    task_id: str
-    operator_message: str = ""
-    technical_message: str = ""
-    error_code: str = ""
-    temp_scan_path: Path | None = None
-    file_name: str | None = None
-    file_path: Path | None = None
+    stage: str
+    result: ProcessedDocument | None = None
+    error_code: str | None = None
+    operator_message: str | None = None
+    technical_message: str | None = None
     details: dict | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "success": self.success,
-            "stage": self.stage,
-            "operation_id": self.operation_id,
-            "task_id": self.task_id,
-            "operator_message": self.operator_message,
-            "technical_message": self.technical_message,
-            "error_code": self.error_code,
-            "temp_scan_path": str(self.temp_scan_path) if self.temp_scan_path else None,
-            "file_name": self.file_name,
-            "file_path": str(self.file_path) if self.file_path else None,
-            "details": self.details or {},
-        }
 
 
 def build_operation_id() -> str:
@@ -69,78 +63,51 @@ def build_operation_id() -> str:
     return f"SCAN_{now}_{suffix}"
 
 
-def _error_to_result(
-    exc: Exception,
-    *,
-    stage: str,
-    operation_id: str,
-    task_id: str,
-    temp_scan_path: Path | None = None,
-) -> DocumentProcessResult:
-    operator_message = "Произошла ошибка обработки документа."
-    technical_message = repr(exc)
-    error_code = "unknown_error"
-    details: dict = {}
+def get_effective_scanner_settings(
+    scanner_settings: ScannerSettings | None,
+) -> ScannerSettings:
+    if scanner_settings is not None:
+        return scanner_settings
 
-    if hasattr(exc, "to_operator_text"):
-        operator_message = exc.to_operator_text()  # type: ignore[attr-defined]
-
-    if hasattr(exc, "to_log_dict"):
-        details = exc.to_log_dict()  # type: ignore[attr-defined]
-        error_code = str(details.get("code") or error_code)
-        technical_message = str(details.get("technical_message") or technical_message)
-
-    return DocumentProcessResult(
-        success=False,
-        stage=stage,
-        operation_id=operation_id,
-        task_id=task_id,
-        operator_message=operator_message,
-        technical_message=technical_message,
-        error_code=error_code,
-        temp_scan_path=temp_scan_path,
-        details=details,
-    )
+    return load_settings_from_env()
 
 
-def precheck_document_flow(
+def get_effective_storage_settings(
+    storage_settings: StorageSettings | None,
+) -> StorageSettings:
+    if storage_settings is not None:
+        return storage_settings
+
+    return load_storage_settings_from_env()
+
+
+def get_lock_path(
+    scanner_settings: ScannerSettings,
+    lock_settings: ScannerLockSettings | None,
+) -> Path:
+    if lock_settings and lock_settings.lock_file:
+        return Path(lock_settings.lock_file)
+
+    return Path(scanner_settings.incoming_dir) / ".scanner.lock"
+
+
+def prevalidate_before_lock(
     doc_type: str,
     document_datetime: datetime | str,
     document_number: str,
-    storage_settings: StorageSettings | None = None,
 ) -> str:
     """
-    Простая предварительная проверка до запуска сканера.
+    Проверяем входные данные до захвата lock.
 
-    Что проверяем заранее:
-    1. Можно ли сформировать имя файла.
-    2. Можно ли построить/создать папку архива.
-
-    Это важно: если оператор передал плохие входные данные,
-    лучше узнать об этом до физического сканирования.
+    Это важно:
+    если номер/тип/дата некорректны, не надо занимать сканер.
     """
 
-    if storage_settings is None:
-        storage_settings = StorageSettings()
-
-    file_name = build_document_filename(
+    return build_document_filename(
         doc_type=doc_type,
         document_datetime=document_datetime,
         document_number=document_number,
     )
-
-    destination_dir = build_archive_directory(
-        archive_root=Path(storage_settings.archive_root),
-        doc_type=doc_type,
-        document_datetime=document_datetime,
-    )
-
-    ensure_archive_directory(
-        destination_dir=destination_dir,
-        archive_root=Path(storage_settings.archive_root),
-    )
-
-    return file_name
 
 
 def process_document_scan(
@@ -151,68 +118,94 @@ def process_document_scan(
     *,
     scanner_settings: ScannerSettings | None = None,
     storage_settings: StorageSettings | None = None,
-    operation_id: str | None = None,
+    lock_settings: ScannerLockSettings | None = None,
+    use_lock: bool = True,
 ) -> ProcessedDocument:
     """
-    Полный процесс с исключениями.
+    Полный процесс:
 
-    Порядок улучшен:
-    1. Сначала проверяем имя и архив.
-    2. Только потом запускаем сканер.
-    3. Потом переносим файл.
+    1. Проверяем входные данные для имени.
+    2. Захватываем file lock сканера.
+    3. Сканируем документ во временный PDF.
+    4. Переносим PDF в архив.
+    5. Освобождаем lock.
+    6. Возвращаем финальное имя и путь.
+
+    Lock защищает физический сканер от одновременного запуска.
     """
 
-    if operation_id is None:
-        operation_id = build_operation_id()
-
     task_id_str = str(task_id).strip()
+    operation_id = build_operation_id()
 
-    logger.info(
-        "Document flow started operation_id=%s task_id=%s doc_type=%s document_datetime=%s document_number=%s",
-        operation_id,
-        task_id_str,
-        doc_type,
-        document_datetime,
-        document_number,
-    )
+    effective_scanner_settings = get_effective_scanner_settings(scanner_settings)
+    effective_storage_settings = get_effective_storage_settings(storage_settings)
 
-    precheck_document_flow(
+    # Предварительная проверка имени до lock.
+    # store_document всё равно сформирует имя ещё раз,
+    # но здесь мы отсекаем ошибки входных данных до занятия сканера.
+    expected_file_name = prevalidate_before_lock(
         doc_type=doc_type,
         document_datetime=document_datetime,
         document_number=document_number,
-        storage_settings=storage_settings,
     )
 
-    temp_scan_path = scan_document(
-        task_id=task_id_str,
-        settings=scanner_settings,
-        operation_id=operation_id,
-    )
-
-    stored_document: StoredDocument = store_document(
-        source_path=temp_scan_path,
-        doc_type=doc_type,
-        document_datetime=document_datetime,
-        document_number=document_number,
-        settings=storage_settings,
-        operation_id=operation_id,
+    lock_path = get_lock_path(
+        scanner_settings=effective_scanner_settings,
+        lock_settings=lock_settings,
     )
 
     logger.info(
-        "Document flow completed operation_id=%s task_id=%s file_name=%s file_path=%s",
+        "Document scan process started: operation_id=%s task_id=%s expected_file_name=%s lock_path=%s",
         operation_id,
         task_id_str,
-        stored_document.file_name,
-        stored_document.file_path,
+        expected_file_name,
+        lock_path,
     )
 
-    return ProcessedDocument(
+    if lock_settings is None:
+        lock_settings = ScannerLockSettings()
+
+    if use_lock:
+        lock_context = scanner_lock(
+            lock_path=lock_path,
+            operation_id=operation_id,
+            task_id=task_id_str,
+            settings=lock_settings,
+        )
+    else:
+        lock_context = _NullLockContext()
+
+    with lock_context:
+        temp_scan_path = scan_document(
+            task_id=task_id_str,
+            settings=effective_scanner_settings,
+        )
+
+        stored_document: StoredDocument = store_document(
+            source_path=temp_scan_path,
+            doc_type=doc_type,
+            document_datetime=document_datetime,
+            document_number=document_number,
+            settings=effective_storage_settings,
+        )
+
+    processed_document = ProcessedDocument(
         task_id=task_id_str,
         operation_id=operation_id,
         temp_scan_path=temp_scan_path,
         file_name=stored_document.file_name,
         file_path=stored_document.file_path,
     )
+
+    logger.info(
+        "Document scan process finished: operation_id=%s task_id=%s file_name=%s file_path=%s",
+        operation_id,
+        task_id_str,
+        processed_document.file_name,
+        processed_document.file_path,
+    )
+
+    return processed_document
 
 
 def process_document_scan_safe(
@@ -223,68 +216,96 @@ def process_document_scan_safe(
     *,
     scanner_settings: ScannerSettings | None = None,
     storage_settings: StorageSettings | None = None,
-    operation_id: str | None = None,
+    lock_settings: ScannerLockSettings | None = None,
+    use_lock: bool = True,
 ) -> DocumentProcessResult:
     """
-    Полный процесс без выброса исключений наружу.
+    Безопасная обёртка.
 
-    Это удобный формат для будущего API:
-    функция всегда возвращает DocumentProcessResult.
+    Не выбрасывает ожидаемые ошибки наружу,
+    а возвращает DocumentProcessResult.
+    Это удобно для будущего FastAPI и Planfix.
     """
 
-    if operation_id is None:
-        operation_id = build_operation_id()
-
-    task_id_str = str(task_id).strip()
-    temp_scan_path: Path | None = None
+    operation_id = build_operation_id()
 
     try:
-        precheck_document_flow(
+        result = process_document_scan(
+            task_id=task_id,
             doc_type=doc_type,
             document_datetime=document_datetime,
             document_number=document_number,
+            scanner_settings=scanner_settings,
             storage_settings=storage_settings,
+            lock_settings=lock_settings,
+            use_lock=use_lock,
         )
-    except NamingError as exc:
-        logger.exception("Document flow precheck naming error operation_id=%s", operation_id)
-        return _error_to_result(exc, stage="naming", operation_id=operation_id, task_id=task_id_str)
-    except StorageError as exc:
-        logger.exception("Document flow precheck storage error operation_id=%s", operation_id)
-        return _error_to_result(exc, stage="storage_precheck", operation_id=operation_id, task_id=task_id_str)
 
-    try:
-        temp_scan_path = scan_document(
-            task_id=task_id_str,
-            settings=scanner_settings,
-            operation_id=operation_id,
+        return DocumentProcessResult(
+            success=True,
+            operation_id=result.operation_id,
+            stage="finished",
+            result=result,
         )
+
+    except ScannerLockError as exc:
+        logger.warning(
+            "Document scan lock error: operation_id=%s error=%s",
+            operation_id,
+            exc.to_log_dict(),
+        )
+
+        return DocumentProcessResult(
+            success=False,
+            operation_id=operation_id,
+            stage="lock",
+            error_code=exc.code,
+            operator_message=exc.operator_message,
+            technical_message=exc.technical_message,
+            details=exc.to_log_dict(),
+        )
+
+    except NamingError as exc:
+        return DocumentProcessResult(
+            success=False,
+            operation_id=operation_id,
+            stage="naming",
+            error_code=exc.code,
+            operator_message=exc.operator_message,
+            technical_message=exc.technical_message,
+            details=exc.to_log_dict(),
+        )
+
     except ScannerError as exc:
-        logger.exception("Document flow scanner error operation_id=%s", operation_id)
-        return _error_to_result(exc, stage="scanner", operation_id=operation_id, task_id=task_id_str)
-
-    try:
-        stored_document = store_document(
-            source_path=temp_scan_path,
-            doc_type=doc_type,
-            document_datetime=document_datetime,
-            document_number=document_number,
-            settings=storage_settings,
+        return DocumentProcessResult(
+            success=False,
             operation_id=operation_id,
+            stage="scanner",
+            error_code=exc.code,
+            operator_message=exc.operator_message,
+            technical_message=exc.technical_message,
+            details=exc.to_log_dict(),
         )
-    except NamingError as exc:
-        logger.exception("Document flow naming error after scan operation_id=%s temp_scan_path=%s", operation_id, temp_scan_path)
-        return _error_to_result(exc, stage="naming", operation_id=operation_id, task_id=task_id_str, temp_scan_path=temp_scan_path)
-    except StorageError as exc:
-        logger.exception("Document flow storage error operation_id=%s temp_scan_path=%s", operation_id, temp_scan_path)
-        return _error_to_result(exc, stage="storage", operation_id=operation_id, task_id=task_id_str, temp_scan_path=temp_scan_path)
 
-    return DocumentProcessResult(
-        success=True,
-        stage="done",
-        operation_id=operation_id,
-        task_id=task_id_str,
-        operator_message="Документ успешно отсканирован и сохранён в архив.",
-        temp_scan_path=temp_scan_path,
-        file_name=stored_document.file_name,
-        file_path=stored_document.file_path,
-    )
+    except StorageError as exc:
+        return DocumentProcessResult(
+            success=False,
+            operation_id=operation_id,
+            stage="storage",
+            error_code=exc.code,
+            operator_message=exc.operator_message,
+            technical_message=exc.technical_message,
+            details=exc.to_log_dict(),
+        )
+
+
+class _NullLockContext:
+    """
+    Используется только для тестов, если use_lock=False.
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return None

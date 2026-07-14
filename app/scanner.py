@@ -441,12 +441,62 @@ def classify_naps2_error(
     return None
 
 
+def kill_process_tree(process: subprocess.Popen, operation_id: str | None = None) -> None:
+    """
+    Принудительно завершает процесс NAPS2 и его дочерние процессы.
+
+    На Windows используем taskkill /T /F:
+        /T — завершить дерево процессов
+        /F — принудительно
+
+    Важно:
+        мы убиваем только процесс, который сами запустили,
+        по его PID.
+    """
+
+    if process.poll() is not None:
+        return
+
+    logger.warning(
+        "Killing NAPS2 process tree operation_id=%s pid=%s",
+        operation_id,
+        process.pid,
+    )
+
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+
+    except Exception as exc:
+        logger.exception(
+            "Failed to kill NAPS2 process tree operation_id=%s pid=%s error=%s",
+            operation_id,
+            process.pid,
+            exc,
+        )
+
+
 def run_naps2(
     command: list[str],
     settings: ScannerSettings,
     output_path: Path,
     operation_id: str | None = None,
 ) -> None:
+    """
+    Запускаем NAPS2 и ждём завершения.
+
+    Важная защита:
+    если NAPS2 зависает дольше timeout_seconds,
+    принудительно завершаем именно запущенный нами процесс.
+    """
+
+    start_time = time.monotonic()
+
     logger.info(
         "Starting NAPS2 scan operation_id=%s output_path=%s command=%s",
         operation_id,
@@ -454,45 +504,58 @@ def run_naps2(
         command,
     )
 
-    started_at = time.monotonic()
+    process: subprocess.Popen | None = None
 
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding=_get_console_encoding(),
             errors="replace",
-            timeout=settings.timeout_seconds,
-            check=False,
         )
 
-    except subprocess.TimeoutExpired as exc:
-        stdout = _to_text(exc.stdout)
-        stderr = _to_text(exc.stderr)
-        duration_seconds = round(time.monotonic() - started_at, 3)
+        try:
+            stdout, stderr = process.communicate(
+                timeout=settings.timeout_seconds,
+            )
 
-        logger.error(
-            "NAPS2 timeout operation_id=%s duration_seconds=%s output_path=%s stdout=%r stderr=%r",
-            operation_id,
-            duration_seconds,
-            output_path,
-            stdout,
-            stderr,
-        )
+        except subprocess.TimeoutExpired as exc:
+            duration_seconds = round(time.monotonic() - start_time, 3)
 
-        raise ScannerTimeoutError(
-            code="scanner_timeout",
-            operator_message=f"Сканирование не завершилось за {settings.timeout_seconds} секунд. Возможно, драйвер ждёт действие оператора или сканер не отвечает.",
-            technical_message=f"NAPS2 timeout after {settings.timeout_seconds} seconds",
-            output_path=output_path,
-            stdout=stdout,
-            stderr=stderr,
-        ) from exc
+            logger.error(
+                "NAPS2 timeout operation_id=%s duration_seconds=%s output_path=%s",
+                operation_id,
+                duration_seconds,
+                output_path,
+            )
+
+            kill_process_tree(
+                process=process,
+                operation_id=operation_id,
+            )
+
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stdout = _to_text(exc.stdout)
+                stderr = _to_text(exc.stderr)
+
+            raise ScannerTimeoutError(
+                code="scanner_timeout",
+                operator_message=(
+                    f"Сканирование не завершилось за {settings.timeout_seconds} секунд. "
+                    "Программа сканирования была принудительно остановлена. "
+                    "Проверьте сканер, VPN, сеть и повторите попытку."
+                ),
+                technical_message=f"NAPS2 timeout after {settings.timeout_seconds} seconds",
+                output_path=output_path,
+                stdout=stdout or "",
+                stderr=stderr or "",
+            ) from exc
 
     except OSError as exc:
-        logger.exception("NAPS2 launch error operation_id=%s output_path=%s", operation_id, output_path)
-
         raise ScannerProcessError(
             code="naps2_launch_error",
             operator_message="Не удалось запустить программу сканирования. Обратитесь к администратору.",
@@ -500,14 +563,15 @@ def run_naps2(
             output_path=output_path,
         ) from exc
 
-    duration_seconds = round(time.monotonic() - started_at, 3)
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
+    duration_seconds = round(time.monotonic() - start_time, 3)
+    stdout = stdout or ""
+    stderr = stderr or ""
+    return_code = process.returncode if process else None
 
     logger.info(
         "NAPS2 finished operation_id=%s return_code=%s duration_seconds=%s output_path=%s stdout=%r stderr=%r",
         operation_id,
-        completed.returncode,
+        return_code,
         duration_seconds,
         output_path,
         stdout,
@@ -518,21 +582,21 @@ def run_naps2(
         stdout=stdout,
         stderr=stderr,
         output_path=output_path,
-        return_code=completed.returncode,
+        return_code=return_code,
     )
 
     if known_error:
         raise known_error
 
-    if completed.returncode != 0:
+    if return_code != 0:
         raise ScannerProcessError(
             code="naps2_process_error",
             operator_message="Программа сканирования завершилась с ошибкой. Повторите попытку или обратитесь к администратору.",
-            technical_message=f"NAPS2 return code: {completed.returncode}",
+            technical_message=f"NAPS2 return code: {return_code}",
             output_path=output_path,
             stdout=stdout,
             stderr=stderr,
-            return_code=completed.returncode,
+            return_code=return_code,
         )
 
 

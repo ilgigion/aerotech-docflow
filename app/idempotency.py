@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -9,8 +9,11 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import time
+
+from app.naming import normalize_doc_type, normalize_document_number, parse_document_datetime
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +77,10 @@ class IdempotencyRecordError(IdempotencyError):
     pass
 
 
+class IdempotencyConflictError(IdempotencyError):
+    pass
+
+
 @dataclass(frozen=True)
 class IdempotencySettings:
     """
@@ -107,6 +114,7 @@ class IdempotencyRecord:
     document_datetime: str
     document_number: str
     expected_file_name: str
+    request_fingerprint: str = ""
     temp_scan_path: str | None = None
     final_file_name: str | None = None
     final_file_path: str | None = None
@@ -130,6 +138,7 @@ class IdempotencyRecord:
             "document_datetime": self.document_datetime,
             "document_number": self.document_number,
             "expected_file_name": self.expected_file_name,
+            "request_fingerprint": self.request_fingerprint,
             "temp_scan_path": self.temp_scan_path,
             "final_file_name": self.final_file_name,
             "final_file_path": self.final_file_path,
@@ -154,6 +163,7 @@ class IdempotencyRecord:
             document_datetime=str(data.get("document_datetime", "")),
             document_number=str(data.get("document_number", "")),
             expected_file_name=str(data.get("expected_file_name", "")),
+            request_fingerprint=str(data.get("request_fingerprint", "")),
             temp_scan_path=_optional_str(data.get("temp_scan_path")),
             final_file_name=_optional_str(data.get("final_file_name")),
             final_file_path=_optional_str(data.get("final_file_path")),
@@ -243,6 +253,30 @@ def build_business_idempotency_key(
     return f"scan:{task_id}:{doc_type}:{document_datetime}:{document_number}"
 
 
+def build_request_fingerprint(
+    *,
+    task_id: int | str,
+    doc_type: str,
+    document_datetime: Any,
+    document_number: str,
+) -> str:
+    """Строит стабильный fingerprint бизнес-параметров операции."""
+
+    canonical = {
+        "task_id": str(task_id).strip(),
+        "doc_type": normalize_doc_type(doc_type),
+        "document_datetime": parse_document_datetime(document_datetime).isoformat(timespec="seconds"),
+        "document_number": normalize_document_number(document_number),
+    }
+    payload = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 
 def build_record_path(record_dir: Path | str, idempotency_key: str) -> Path:
     record_dir = Path(record_dir)
@@ -252,6 +286,45 @@ def build_record_path(record_dir: Path | str, idempotency_key: str) -> Path:
         safe = "key"
     safe = safe[:80]
     return record_dir / f"{safe}_{digest}.json"
+
+
+def _ensure_recorded_path_within(
+    *,
+    raw_path: str | None,
+    allowed_root: Path | str | None,
+    path_kind: str,
+    idempotency_key: str,
+    record_path: Path,
+    record: IdempotencyRecord,
+) -> None:
+    if not raw_path or allowed_root is None:
+        return
+
+    try:
+        resolved_root = Path(allowed_root).resolve(strict=False)
+        resolved_path = Path(raw_path).resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise IdempotencyRecordError(
+            code=f"idempotency_{path_kind}_path_resolve_error",
+            operator_message="Запись идемпотентности содержит некорректный путь к PDF.",
+            technical_message=str(exc),
+            idempotency_key=idempotency_key,
+            record_path=record_path,
+            record=record.to_dict(),
+        ) from exc
+
+    if resolved_path == resolved_root or resolved_root not in resolved_path.parents:
+        raise IdempotencyRecordError(
+            code=f"idempotency_{path_kind}_path_outside_allowed_root",
+            operator_message="Запись идемпотентности содержит небезопасный путь к PDF.",
+            technical_message=(
+                f"Resolved {path_kind} path is outside allowed root: "
+                f"path={resolved_path}; root={resolved_root}"
+            ),
+            idempotency_key=idempotency_key,
+            record_path=record_path,
+            record=record.to_dict(),
+        )
 
 
 
@@ -348,6 +421,7 @@ def _new_processing_record(
     document_datetime: Any,
     document_number: str,
     expected_file_name: str,
+    request_fingerprint: str,
     attempt: int = 1,
 ) -> IdempotencyRecord:
     now = utc_now_iso()
@@ -360,6 +434,7 @@ def _new_processing_record(
         document_datetime=str(document_datetime),
         document_number=str(document_number),
         expected_file_name=str(expected_file_name),
+        request_fingerprint=request_fingerprint,
         attempt=attempt,
         pid=os.getpid(),
         hostname=socket.gethostname(),
@@ -387,6 +462,8 @@ def begin_idempotent_operation(
     document_number: str,
     expected_file_name: str,
     settings: IdempotencySettings,
+    incoming_dir: Path | str | None = None,
+    archive_root: Path | str | None = None,
 ) -> IdempotencyDecision:
     """
     Решает, надо ли реально сканировать, вернуть старый результат или повторить storage.
@@ -397,6 +474,12 @@ def begin_idempotent_operation(
         return IdempotencyDecision(mode="disabled")
 
     record_path = build_record_path(settings.record_dir, normalized_key)
+    request_fingerprint = build_request_fingerprint(
+        task_id=task_id,
+        doc_type=doc_type,
+        document_datetime=document_datetime,
+        document_number=document_number,
+    )
 
     new_record = _new_processing_record(
         idempotency_key=normalized_key,
@@ -406,6 +489,7 @@ def begin_idempotent_operation(
         document_datetime=document_datetime,
         document_number=document_number,
         expected_file_name=expected_file_name,
+        request_fingerprint=request_fingerprint,
     )
 
     try:
@@ -432,7 +516,59 @@ def begin_idempotent_operation(
                 document_number=document_number,
                 expected_file_name=expected_file_name,
                 settings=settings,
+                incoming_dir=incoming_dir,
+                archive_root=archive_root,
             )
+
+    existing_fingerprint = existing.request_fingerprint
+    if not existing_fingerprint:
+        try:
+            existing_fingerprint = build_request_fingerprint(
+                task_id=existing.task_id,
+                doc_type=existing.doc_type,
+                document_datetime=existing.document_datetime,
+                document_number=existing.document_number,
+            )
+        except Exception as exc:
+            raise IdempotencyRecordError(
+                code="idempotency_record_fingerprint_error",
+                operator_message="Запись идемпотентности содержит некорректные параметры документа.",
+                technical_message=str(exc),
+                idempotency_key=normalized_key,
+                record_path=record_path,
+                record=existing.to_dict(),
+            ) from exc
+        existing = replace(existing, request_fingerprint=existing_fingerprint)
+
+    if not secrets.compare_digest(existing_fingerprint, request_fingerprint):
+        raise IdempotencyConflictError(
+            code="idempotency_key_request_conflict",
+            operator_message="Этот ключ идемпотентности уже использован для другого документа.",
+            technical_message=(
+                "Idempotency key request fingerprint mismatch: "
+                f"existing={existing_fingerprint} requested={request_fingerprint}"
+            ),
+            idempotency_key=normalized_key,
+            record_path=record_path,
+            record=existing.to_dict(),
+        )
+
+    _ensure_recorded_path_within(
+        raw_path=existing.temp_scan_path,
+        allowed_root=incoming_dir,
+        path_kind="temp",
+        idempotency_key=normalized_key,
+        record_path=record_path,
+        record=existing,
+    )
+    _ensure_recorded_path_within(
+        raw_path=existing.final_file_path,
+        allowed_root=archive_root,
+        path_kind="final",
+        idempotency_key=normalized_key,
+        record_path=record_path,
+        record=existing,
+    )
 
     status = existing.status
 
@@ -467,6 +603,7 @@ def begin_idempotent_operation(
             document_datetime=document_datetime,
             document_number=document_number,
             expected_file_name=expected_file_name,
+            request_fingerprint=request_fingerprint,
             attempt=existing.attempt + 1,
         )
         write_record(record_path, replacement)
@@ -493,6 +630,7 @@ def begin_idempotent_operation(
             document_datetime=document_datetime,
             document_number=document_number,
             expected_file_name=expected_file_name,
+            request_fingerprint=request_fingerprint,
             attempt=existing.attempt + 1,
         )
         write_record(record_path, replacement)
@@ -524,6 +662,7 @@ def begin_idempotent_operation(
             document_datetime=document_datetime,
             document_number=document_number,
             expected_file_name=expected_file_name,
+            request_fingerprint=request_fingerprint,
             attempt=existing.attempt + 1,
         )
         write_record(record_path, replacement)
@@ -538,6 +677,7 @@ def begin_idempotent_operation(
         document_datetime=document_datetime,
         document_number=document_number,
         expected_file_name=expected_file_name,
+        request_fingerprint=request_fingerprint,
         attempt=existing.attempt + 1,
     )
     write_record(record_path, replacement)

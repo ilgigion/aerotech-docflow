@@ -107,6 +107,12 @@ class ScannerProcessError(ScannerError):
     pass
 
 
+class ScannerProcessStillRunningError(ScannerProcessError):
+    """NAPS2 остался жив после принудительного завершения."""
+
+    preserve_scanner_lock = True
+
+
 class ScannerOutputMissingError(ScannerError):
     pass
 
@@ -565,7 +571,17 @@ def kill_process_tree(process: subprocess.Popen, operation_id: str | None = None
                 result.stdout,
                 result.stderr,
             )
-            return
+            if result.returncode == 0 and process.poll() is not None:
+                return
+
+            logger.error(
+                "taskkill did not stop NAPS2; using process.kill fallback "
+                "operation_id=%s pid=%s return_code=%s process_alive=%s",
+                operation_id,
+                process.pid,
+                result.returncode,
+                process.poll() is None,
+            )
 
         except Exception as exc:
             logger.exception(
@@ -803,12 +819,20 @@ def run_naps2(
             )
 
             if not process_stopped:
-                logger.error(
-                    "Scanner manual check required after timeout operation_id=%s output_path=%s quarantine_path=%s",
-                    operation_id,
-                    output_path,
-                    quarantine_path,
-                )
+                raise ScannerProcessStillRunningError(
+                    code="scanner_process_still_running",
+                    operator_message=(
+                        "NAPS2 не удалось остановить после тайм-аута. "
+                        "Блокировка сканера сохранена; требуется ручная диагностика."
+                    ),
+                    technical_message=(
+                        f"NAPS2 still alive after timeout; pid={process.pid}; "
+                        f"quarantine_path={quarantine_path}; manual_recovery_required=1"
+                    ),
+                    output_path=output_path,
+                    stdout=stdout,
+                    stderr=stderr,
+                ) from exc
 
             raise ScannerTimeoutError(
                 code="scanner_timeout",
@@ -859,12 +883,20 @@ def run_naps2(
         )
 
         if not process_stopped:
-            logger.error(
-                "Scanner manual check required after interruption operation_id=%s output_path=%s quarantine_path=%s",
-                operation_id,
-                output_path,
-                quarantine_path,
-            )
+            raise ScannerProcessStillRunningError(
+                code="scanner_process_still_running",
+                operator_message=(
+                    "NAPS2 не удалось остановить после прерывания. "
+                    "Блокировка сканера сохранена; требуется ручная диагностика."
+                ),
+                technical_message=(
+                    f"NAPS2 still alive after interruption; pid={process.pid if process else None}; "
+                    f"quarantine_path={quarantine_path}; manual_recovery_required=1"
+                ),
+                output_path=output_path,
+                stdout=stdout,
+                stderr=stderr,
+            ) from exc
 
         raise ScannerInterruptedError(
             code="scanner_interrupted",
@@ -964,28 +996,29 @@ def wait_until_file_is_stable(
         time.sleep(interval_seconds)
 
 
-def count_pdf_pages_if_possible(path: Path) -> int | None:
-    """
-    Пытается посчитать страницы PDF, если установлена библиотека pypdf.
-
-    Возвращает:
-        int  — количество страниц;
-        None — pypdf не установлен или PDF не удалось прочитать.
-
-    Мы не делаем это обязательной зависимостью сейчас, чтобы не ломать проект.
-    """
+def count_pdf_pages_if_possible(path: Path) -> int:
+    """Строго читает PDF и возвращает количество страниц."""
 
     try:
         from pypdf import PdfReader  # type: ignore
-    except ImportError:
-        return None
+    except ImportError as exc:
+        raise ScannerOutputInvalidError(
+            code="pypdf_not_installed",
+            operator_message="Не установлен обязательный модуль проверки PDF.",
+            technical_message="Required dependency pypdf is not installed",
+            output_path=path,
+        ) from exc
 
     try:
-        reader = PdfReader(str(path))
+        reader = PdfReader(str(path), strict=True)
         return len(reader.pages)
     except Exception as exc:
-        logger.warning("Could not count PDF pages path=%s error=%s", path, exc)
-        return None
+        raise ScannerOutputInvalidError(
+            code="output_pdf_parse_error",
+            operator_message="PDF-файл повреждён или имеет некорректную структуру.",
+            technical_message=f"pypdf could not parse PDF: {exc}",
+            output_path=path,
+        ) from exc
 
 
 def validate_pdf_output(output_path: Path, settings: ScannerSettings) -> None:
@@ -1023,6 +1056,8 @@ def validate_pdf_output(output_path: Path, settings: ScannerSettings) -> None:
 
     with output_path.open("rb") as file:
         header = file.read(5)
+        file.seek(max(0, file_size - 4096))
+        tail = file.read()
 
     if header != b"%PDF-":
         raise ScannerOutputInvalidError(
@@ -1032,19 +1067,24 @@ def validate_pdf_output(output_path: Path, settings: ScannerSettings) -> None:
             output_path=output_path,
         )
 
-    page_count = count_pdf_pages_if_possible(output_path)
-    if page_count is not None:
-        logger.info("PDF page count checked output_path=%s page_count=%s", output_path, page_count)
+    if b"%%EOF" not in tail:
+        raise ScannerOutputInvalidError(
+            code="output_pdf_missing_eof",
+            operator_message="PDF-файл не завершён и может быть повреждён.",
+            technical_message="PDF EOF marker was not found in the final 4096 bytes",
+            output_path=output_path,
+        )
 
-        if page_count < settings.min_pdf_pages:
-            raise ScannerOutputInvalidError(
-                code="output_pdf_has_no_pages",
-                operator_message="PDF-файл создан, но в нём нет страниц.",
-                technical_message=f"PDF page count={page_count}, min_pdf_pages={settings.min_pdf_pages}",
-                output_path=output_path,
-            )
-    else:
-        logger.info("PDF page count skipped output_path=%s reason=pypdf_not_available", output_path)
+    page_count = count_pdf_pages_if_possible(output_path)
+    logger.info("PDF page count checked output_path=%s page_count=%s", output_path, page_count)
+
+    if page_count < settings.min_pdf_pages:
+        raise ScannerOutputInvalidError(
+            code="output_pdf_has_no_pages",
+            operator_message="PDF-файл создан, но в нём нет страниц.",
+            technical_message=f"PDF page count={page_count}, min_pdf_pages={settings.min_pdf_pages}",
+            output_path=output_path,
+        )
 
 
 def scan_document(

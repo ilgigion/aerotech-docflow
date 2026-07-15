@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 
 from app.idempotency import (
+    IdempotencyConflictError,
     IdempotencySettings,
     begin_idempotent_operation,
     mark_scanned,
@@ -49,5 +50,20 @@ with tempfile.TemporaryDirectory() as tmp:
         settings=settings,
     )
     assert decision2.mode == "return_existing"
+
+    try:
+        begin_idempotent_operation(
+            idempotency_key=key,
+            operation_id="OP3",
+            task_id="TASK1",
+            doc_type="УПД",
+            document_datetime=datetime(2026, 7, 10, 10, 10, 25),
+            document_number="DIFFERENT",
+            expected_file_name="УПД_260710_101025_DIFFERENT.pdf",
+            settings=settings,
+        )
+        raise AssertionError("Expected IdempotencyConflictError")
+    except IdempotencyConflictError as exc:
+        assert exc.code == "idempotency_key_request_conflict"
 
 print("OK: idempotency")

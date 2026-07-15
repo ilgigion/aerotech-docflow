@@ -345,6 +345,17 @@ class ScannerFileLock(AbstractContextManager["ScannerFileLock"]):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if getattr(exc_value, "preserve_scanner_lock", False):
+            logger.critical(
+                "Scanner lock intentionally preserved for manual recovery: "
+                "lock_path=%s operation_id=%s task_id=%s error=%s",
+                self.lock_path,
+                self.operation_id,
+                self.task_id,
+                exc_value,
+            )
+            self._owns_lock = False
+            return
         self.release()
 
     @property

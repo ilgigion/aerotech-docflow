@@ -6,8 +6,11 @@ MODULES = [
     "tests.unit.run_storage_test",
     "tests.unit.run_storage_failure_test",
     "tests.unit.run_idempotency_test",
+    "tests.unit.run_idempotency_path_safety_test",
+    "tests.unit.run_critical_safety_test",
     "tests.unit.run_monthly_file_logging_test",
     "tests.unit.run_incoming_cleanup_test",
+    "tests.unit.run_api_test",
 ]
 
 for module in MODULES:

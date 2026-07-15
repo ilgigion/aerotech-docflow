@@ -590,34 +590,48 @@ def finalize_atomic_move(
     destination_path: Path,
 ) -> None:
     """
-    Финализирует перенос:
-        .tmp -> final.pdf
+    Атомарно публикует .tmp как final.pdf без возможности перезаписи.
 
-    Перед os.replace проверяем, что финальный файл не появился извне.
-    .reserve-файл не является destination_path, поэтому он не мешает.
+    temp_path и destination_path находятся в одном каталоге. Создание hard link
+    является атомарным и завершается FileExistsError, если финальное имя уже
+    занято. Только после успешной публикации удаляется имя временного файла.
+    Это устраняет окно между exists-check и os.replace().
     """
 
     try:
-        if destination_path.exists():
-            raise FileMoveError(
-                code="destination_appeared_during_atomic_move",
-                operator_message="Файл с таким именем появился в архиве во время переноса.",
-                technical_message=f"Destination already exists: {destination_path}",
-                destination_path=destination_path,
-                temp_path=temp_path,
-            )
-
-        os.replace(str(temp_path), str(destination_path))
-    except FileMoveError:
-        raise
-    except OSError as exc:
+        os.link(str(temp_path), str(destination_path))
+    except FileExistsError as exc:
         raise FileMoveError(
-            code="atomic_finalize_error",
-            operator_message="Не удалось завершить перенос файла в архив.",
-            technical_message=str(exc),
+            code="destination_appeared_during_atomic_move",
+            operator_message="Файл с таким именем появился в архиве во время переноса.",
+            technical_message=f"Destination already exists: {destination_path}",
             destination_path=destination_path,
             temp_path=temp_path,
         ) from exc
+    except OSError as exc:
+        raise FileMoveError(
+            code="atomic_no_clobber_finalize_error",
+            operator_message=(
+                "Не удалось безопасно опубликовать файл в архиве без перезаписи. "
+                "Проверьте поддержку hard links файловой системой архива."
+            ),
+            technical_message=f"No-clobber hard-link publish failed: {exc}",
+            destination_path=destination_path,
+            temp_path=temp_path,
+        ) from exc
+
+    try:
+        temp_path.unlink()
+    except OSError as exc:
+        # Финальный файл уже безопасно опубликован. Не удаляем его при ошибке
+        # очистки второго имени того же файла.
+        logger.warning(
+            "Final file published but atomic temp link cleanup failed "
+            "temp_path=%s destination_path=%s error=%s",
+            temp_path,
+            destination_path,
+            exc,
+        )
 
 
 def remove_source_after_success(

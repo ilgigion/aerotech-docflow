@@ -21,7 +21,13 @@ from app.idempotency import (
 from app.locks import ScannerLockError, ScannerLockSettings, scanner_lock
 from app.monthly_file_logging import configure_monthly_file_logging_from_env
 from app.naming import NamingError, build_document_filename
-from app.scanner import ScannerError, ScannerSettings, load_settings_from_env, scan_document
+from app.scanner import (
+    ScannerError,
+    ScannerSettings,
+    load_settings_from_env,
+    scan_document,
+    validate_pdf_output,
+)
 from app.storage import (
     StorageError,
     StorageSettings,
@@ -128,10 +134,73 @@ def prevalidate_before_lock(
     )
 
 
+def _resolve_idempotency_path_within(
+    *,
+    raw_path: str,
+    allowed_root: Path,
+    path_kind: str,
+    record: IdempotencyRecord,
+    record_path: Path | None = None,
+) -> Path:
+    """Разрешает путь из marker-файла только внутри доверенного корня."""
+
+    try:
+        resolved_root = Path(allowed_root).resolve(strict=False)
+        resolved_path = Path(raw_path).resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise IdempotencyError(
+            code=f"idempotency_{path_kind}_path_resolve_error",
+            operator_message="Запись идемпотентности содержит некорректный путь к PDF.",
+            technical_message=str(exc),
+            idempotency_key=record.idempotency_key,
+            record_path=record_path,
+            record=record.to_dict(),
+        ) from exc
+
+    if resolved_path == resolved_root or resolved_root not in resolved_path.parents:
+        raise IdempotencyError(
+            code=f"idempotency_{path_kind}_path_outside_allowed_root",
+            operator_message="Запись идемпотентности содержит небезопасный путь к PDF.",
+            technical_message=(
+                f"Resolved {path_kind} path is outside allowed root: "
+                f"path={resolved_path}; root={resolved_root}"
+            ),
+            idempotency_key=record.idempotency_key,
+            record_path=record_path,
+            record=record.to_dict(),
+        )
+
+    return resolved_path
+
+
+def _validate_idempotency_pdf(
+    *,
+    path: Path,
+    path_kind: str,
+    record: IdempotencyRecord,
+    scanner_settings: ScannerSettings,
+    record_path: Path | None = None,
+) -> None:
+    try:
+        validate_pdf_output(path, scanner_settings)
+    except ScannerError as exc:
+        raise IdempotencyError(
+            code=f"idempotency_{path_kind}_pdf_invalid",
+            operator_message="PDF из записи идемпотентности отсутствует или повреждён.",
+            technical_message=f"{exc.code}: {exc.technical_message}",
+            idempotency_key=record.idempotency_key,
+            record_path=record_path,
+            record=record.to_dict(),
+        ) from exc
+
+
 def _processed_from_existing_idempotency_record(
     *,
     task_id: str,
     record: IdempotencyRecord,
+    scanner_settings: ScannerSettings,
+    storage_settings: StorageSettings,
+    record_path: Path | None = None,
 ) -> ProcessedDocument:
     if not record.final_file_path:
         raise IdempotencyError(
@@ -142,8 +211,39 @@ def _processed_from_existing_idempotency_record(
             record=record.to_dict(),
         )
 
-    final_path = Path(record.final_file_path)
-    temp_path = Path(record.temp_scan_path) if record.temp_scan_path else final_path
+    final_path = _resolve_idempotency_path_within(
+        raw_path=record.final_file_path,
+        allowed_root=storage_settings.archive_root,
+        path_kind="final",
+        record=record,
+        record_path=record_path,
+    )
+    _validate_idempotency_pdf(
+        path=final_path,
+        path_kind="final",
+        record=record,
+        scanner_settings=scanner_settings,
+        record_path=record_path,
+    )
+
+    temp_path = final_path
+    if record.temp_scan_path:
+        recorded_temp_path = _resolve_idempotency_path_within(
+            raw_path=record.temp_scan_path,
+            allowed_root=Path(scanner_settings.incoming_dir),
+            path_kind="temp",
+            record=record,
+            record_path=record_path,
+        )
+        if recorded_temp_path.exists():
+            _validate_idempotency_pdf(
+                path=recorded_temp_path,
+                path_kind="temp",
+                record=record,
+                scanner_settings=scanner_settings,
+                record_path=record_path,
+            )
+            temp_path = recorded_temp_path
 
     return ProcessedDocument(
         task_id=task_id,
@@ -165,6 +265,7 @@ def _storage_retry_from_idempotency_record(
     doc_type: str,
     document_datetime: datetime | str,
     document_number: str,
+    scanner_settings: ScannerSettings,
     storage_settings: StorageSettings,
 ) -> ProcessedDocument:
     if not record.temp_scan_path:
@@ -177,7 +278,31 @@ def _storage_retry_from_idempotency_record(
             record=record.to_dict(),
         )
 
-    source_path = Path(record.temp_scan_path)
+    source_path = _resolve_idempotency_path_within(
+        raw_path=record.temp_scan_path,
+        allowed_root=Path(scanner_settings.incoming_dir),
+        path_kind="temp",
+        record=record,
+        record_path=record_path,
+    )
+
+    if not source_path.name.startswith("PF_") or source_path.suffix.lower() != ".pdf":
+        raise IdempotencyError(
+            code="idempotency_temp_path_invalid_name",
+            operator_message="Запись идемпотентности содержит некорректное имя временного PDF.",
+            technical_message=f"Expected managed PF_*.pdf path, got: {source_path}",
+            idempotency_key=record.idempotency_key,
+            record_path=record_path,
+            record=record.to_dict(),
+        )
+
+    _validate_idempotency_pdf(
+        path=source_path,
+        path_kind="temp",
+        record=record,
+        scanner_settings=scanner_settings,
+        record_path=record_path,
+    )
 
     logger.info(
         "Idempotent storage retry started operation_id=%s task_id=%s idempotency_key=%s source_path=%s",
@@ -307,6 +432,8 @@ def process_document_scan(
         document_number=document_number,
         expected_file_name=expected_file_name,
         settings=effective_idempotency_settings,
+        incoming_dir=effective_scanner_settings.incoming_dir,
+        archive_root=effective_storage_settings.archive_root,
     )
 
     idempotency_record = idempotency_decision.record
@@ -324,6 +451,9 @@ def process_document_scan(
         result = _processed_from_existing_idempotency_record(
             task_id=task_id_str,
             record=idempotency_record,
+            scanner_settings=effective_scanner_settings,
+            storage_settings=effective_storage_settings,
+            record_path=idempotency_record_path,
         )
 
         logger.info(
@@ -353,6 +483,7 @@ def process_document_scan(
             doc_type=doc_type,
             document_datetime=document_datetime,
             document_number=document_number,
+            scanner_settings=effective_scanner_settings,
             storage_settings=effective_storage_settings,
         )
 

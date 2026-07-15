@@ -25,10 +25,6 @@ logger = logging.getLogger(__name__)
 class ProcessedDocument:
     """
     Итог полного процесса сканирования и сохранения.
-
-    temp_scan_path — путь к временному PDF, который создал scanner.py.
-    После успешного переноса этот файл уже может не существовать,
-    потому что storage.py переносит его в архив.
     """
 
     task_id: str
@@ -42,18 +38,6 @@ class ProcessedDocument:
 class DocumentProcessResult:
     """
     Безопасный результат для будущего FastAPI/Planfix.
-
-    success=True:
-        result содержит ProcessedDocument.
-
-    success=False:
-        stage, error_code, operator_message и technical_message
-        описывают ошибку.
-
-    Важный сценарий 3.2:
-        если stage="storage", details обычно содержит source_path.
-        Это путь к временному PDF, который можно повторно сохранить
-        без нового сканирования через retry_store_existing_scan().
     """
 
     success: bool
@@ -63,32 +47,14 @@ class DocumentProcessResult:
     error_code: str | None = None
     operator_message: str | None = None
     technical_message: str | None = None
+    temp_scan_path: Path | None = None
     details: dict | None = None
-
-
-@dataclass(frozen=True)
-class StorageRetryResult:
-    """
-    Результат повторного сохранения уже существующего временного PDF.
-    """
-
-    task_id: str
-    operation_id: str
-    source_path: Path
-    file_name: str
-    file_path: Path
 
 
 def build_operation_id() -> str:
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = secrets.token_hex(3)
     return f"SCAN_{now}_{suffix}"
-
-
-def build_storage_retry_operation_id() -> str:
-    now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    suffix = secrets.token_hex(3)
-    return f"STORE_RETRY_{now}_{suffix}"
 
 
 def get_effective_scanner_settings(
@@ -126,9 +92,6 @@ def prevalidate_before_lock(
 ) -> str:
     """
     Проверяем входные данные до захвата lock.
-
-    Это важно:
-    если номер/тип/дата некорректны, не надо занимать сканер.
     """
 
     return build_document_filename(
@@ -136,24 +99,6 @@ def prevalidate_before_lock(
         document_datetime=document_datetime,
         document_number=document_number,
     )
-
-
-def _attach_source_path_to_storage_error(
-    error: StorageError,
-    source_path: Path,
-) -> StorageError:
-    """
-    Гарантирует, что StorageError содержит путь к временному PDF.
-
-    Это основа сценария 3.2:
-    если сканирование прошло, но архив недоступен, мы должны вернуть
-    пользователю temp_scan_path, чтобы можно было повторить только перенос.
-    """
-
-    if error.source_path is None:
-        error.source_path = Path(source_path)
-
-    return error
 
 
 def process_document_scan(
@@ -173,14 +118,9 @@ def process_document_scan(
     1. Проверяем входные данные для имени.
     2. Захватываем file lock сканера.
     3. Сканируем документ во временный PDF.
-    4. Переносим PDF в архив.
+    4. Атомарно переносим PDF в архив.
     5. Освобождаем lock.
     6. Возвращаем финальное имя и путь.
-
-    Улучшение 3.2:
-        если пункт 3 успешен, а пункт 4 упал, временный PDF остаётся
-        на месте, а ошибка содержит source_path. Потом можно вызвать
-        retry_store_existing_scan() и не сканировать документ повторно.
     """
 
     task_id_str = str(task_id).strip()
@@ -228,26 +168,14 @@ def process_document_scan(
             operation_id=operation_id,
         )
 
-        try:
-            stored_document: StoredDocument = store_document(
-                source_path=temp_scan_path,
-                doc_type=doc_type,
-                document_datetime=document_datetime,
-                document_number=document_number,
-                settings=effective_storage_settings,
-                operation_id=operation_id,
-            )
-        except StorageError as exc:
-            _attach_source_path_to_storage_error(exc, temp_scan_path)
-
-            logger.error(
-                "Scan completed but storage failed: operation_id=%s task_id=%s temp_scan_path=%s error=%s",
-                operation_id,
-                task_id_str,
-                temp_scan_path,
-                exc.to_log_dict(),
-            )
-            raise
+        stored_document: StoredDocument = store_document(
+            source_path=temp_scan_path,
+            doc_type=doc_type,
+            document_datetime=document_datetime,
+            document_number=document_number,
+            settings=effective_storage_settings,
+            operation_id=operation_id,
+        )
 
     processed_document = ProcessedDocument(
         task_id=task_id_str,
@@ -276,37 +204,28 @@ def retry_store_existing_scan(
     document_number: str,
     *,
     storage_settings: StorageSettings | None = None,
-) -> StorageRetryResult:
+) -> ProcessedDocument:
     """
     Повторяет только сохранение уже существующего временного PDF.
 
-    Используется в сценарии 3.2:
-        - сканирование успешно создало PDF;
-        - перенос в архив не удался;
-        - оператор/администратор исправил проблему с архивом;
-        - вызываем эту функцию и НЕ сканируем документ повторно.
+    Используется, если:
+        сканирование прошло успешно,
+        но перенос в архив упал из-за прав/сети/архивной папки.
 
-    На вход нужен source_path из StorageError.to_log_dict()["source_path"]
-    или из DocumentProcessResult.details["source_path"].
+    Сканер повторно не запускается.
     """
 
     task_id_str = str(task_id).strip()
-    operation_id = build_storage_retry_operation_id()
+    operation_id = build_operation_id()
     source_path = Path(source_path)
+
     effective_storage_settings = get_effective_storage_settings(storage_settings)
 
-    expected_file_name = prevalidate_before_lock(
-        doc_type=doc_type,
-        document_datetime=document_datetime,
-        document_number=document_number,
-    )
-
     logger.info(
-        "Storage retry started: operation_id=%s task_id=%s source_path=%s expected_file_name=%s",
+        "Retry store existing scan started: operation_id=%s task_id=%s source_path=%s",
         operation_id,
         task_id_str,
         source_path,
-        expected_file_name,
     )
 
     stored_document = store_document(
@@ -318,16 +237,16 @@ def retry_store_existing_scan(
         operation_id=operation_id,
     )
 
-    result = StorageRetryResult(
+    result = ProcessedDocument(
         task_id=task_id_str,
         operation_id=operation_id,
-        source_path=source_path,
+        temp_scan_path=source_path,
         file_name=stored_document.file_name,
         file_path=stored_document.file_path,
     )
 
     logger.info(
-        "Storage retry finished: operation_id=%s task_id=%s file_name=%s file_path=%s",
+        "Retry store existing scan finished: operation_id=%s task_id=%s file_name=%s file_path=%s",
         operation_id,
         task_id_str,
         result.file_name,
@@ -353,10 +272,9 @@ def process_document_scan_safe(
 
     Не выбрасывает ожидаемые ошибки наружу,
     а возвращает DocumentProcessResult.
-    Это удобно для будущего FastAPI и Planfix.
     """
 
-    operation_id = build_operation_id()
+    fallback_operation_id = build_operation_id()
 
     try:
         result = process_document_scan(
@@ -378,15 +296,9 @@ def process_document_scan_safe(
         )
 
     except ScannerLockError as exc:
-        logger.warning(
-            "Document scan lock error: operation_id=%s error=%s",
-            operation_id,
-            exc.to_log_dict(),
-        )
-
         return DocumentProcessResult(
             success=False,
-            operation_id=operation_id,
+            operation_id=fallback_operation_id,
             stage="lock",
             error_code=exc.code,
             operator_message=exc.operator_message,
@@ -397,7 +309,7 @@ def process_document_scan_safe(
     except NamingError as exc:
         return DocumentProcessResult(
             success=False,
-            operation_id=operation_id,
+            operation_id=fallback_operation_id,
             stage="naming",
             error_code=exc.code,
             operator_message=exc.operator_message,
@@ -408,85 +320,24 @@ def process_document_scan_safe(
     except ScannerError as exc:
         return DocumentProcessResult(
             success=False,
-            operation_id=operation_id,
+            operation_id=fallback_operation_id,
             stage="scanner",
             error_code=exc.code,
             operator_message=exc.operator_message,
             technical_message=exc.technical_message,
+            temp_scan_path=exc.output_path,
             details=exc.to_log_dict(),
         )
 
     except StorageError as exc:
         return DocumentProcessResult(
             success=False,
-            operation_id=operation_id,
+            operation_id=fallback_operation_id,
             stage="storage",
             error_code=exc.code,
             operator_message=exc.operator_message,
             technical_message=exc.technical_message,
-            details=exc.to_log_dict(),
-        )
-
-
-def retry_store_existing_scan_safe(
-    task_id: int | str,
-    source_path: Path | str,
-    doc_type: str,
-    document_datetime: datetime | str,
-    document_number: str,
-    *,
-    storage_settings: StorageSettings | None = None,
-) -> DocumentProcessResult:
-    """
-    Безопасная обёртка для повторного переноса без повторного сканирования.
-    """
-
-    operation_id = build_storage_retry_operation_id()
-
-    try:
-        retry_result = retry_store_existing_scan(
-            task_id=task_id,
-            source_path=source_path,
-            doc_type=doc_type,
-            document_datetime=document_datetime,
-            document_number=document_number,
-            storage_settings=storage_settings,
-        )
-
-        processed = ProcessedDocument(
-            task_id=retry_result.task_id,
-            operation_id=retry_result.operation_id,
-            temp_scan_path=retry_result.source_path,
-            file_name=retry_result.file_name,
-            file_path=retry_result.file_path,
-        )
-
-        return DocumentProcessResult(
-            success=True,
-            operation_id=retry_result.operation_id,
-            stage="finished",
-            result=processed,
-        )
-
-    except NamingError as exc:
-        return DocumentProcessResult(
-            success=False,
-            operation_id=operation_id,
-            stage="naming",
-            error_code=exc.code,
-            operator_message=exc.operator_message,
-            technical_message=exc.technical_message,
-            details=exc.to_log_dict(),
-        )
-
-    except StorageError as exc:
-        return DocumentProcessResult(
-            success=False,
-            operation_id=operation_id,
-            stage="storage_retry",
-            error_code=exc.code,
-            operator_message=exc.operator_message,
-            technical_message=exc.technical_message,
+            temp_scan_path=exc.source_path,
             details=exc.to_log_dict(),
         )
 

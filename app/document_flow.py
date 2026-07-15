@@ -6,7 +6,20 @@ from pathlib import Path
 import logging
 import secrets
 
+from app.idempotency import (
+    IdempotencyError,
+    IdempotencyInProgressError,
+    IdempotencyRecord,
+    IdempotencySettings,
+    begin_idempotent_operation,
+    load_idempotency_settings_from_env,
+    mark_failed,
+    mark_scanned,
+    mark_storing,
+    mark_succeeded,
+)
 from app.locks import ScannerLockError, ScannerLockSettings, scanner_lock
+from app.monthly_file_logging import configure_monthly_file_logging_from_env
 from app.naming import NamingError, build_document_filename
 from app.scanner import ScannerError, ScannerSettings, load_settings_from_env, scan_document
 from app.storage import (
@@ -32,6 +45,8 @@ class ProcessedDocument:
     temp_scan_path: Path
     file_name: str
     file_path: Path
+    idempotency_key: str | None = None
+    idempotent_replay: bool = False
 
 
 @dataclass(frozen=True)
@@ -75,6 +90,18 @@ def get_effective_storage_settings(
     return load_storage_settings_from_env()
 
 
+def get_effective_idempotency_settings(
+    idempotency_settings: IdempotencySettings | None,
+    scanner_settings: ScannerSettings,
+) -> IdempotencySettings:
+    if idempotency_settings is not None:
+        return idempotency_settings
+
+    return load_idempotency_settings_from_env(
+        default_incoming_dir=Path(scanner_settings.incoming_dir),
+    )
+
+
 def get_lock_path(
     scanner_settings: ScannerSettings,
     lock_settings: ScannerLockSettings | None,
@@ -101,6 +128,116 @@ def prevalidate_before_lock(
     )
 
 
+def _processed_from_existing_idempotency_record(
+    *,
+    task_id: str,
+    record: IdempotencyRecord,
+) -> ProcessedDocument:
+    if not record.final_file_path:
+        raise IdempotencyError(
+            code="idempotency_missing_final_path",
+            operator_message="Операция уже отмечена выполненной, но путь к файлу не сохранён.",
+            technical_message="Succeeded idempotency record has no final_file_path",
+            idempotency_key=record.idempotency_key,
+            record=record.to_dict(),
+        )
+
+    final_path = Path(record.final_file_path)
+    temp_path = Path(record.temp_scan_path) if record.temp_scan_path else final_path
+
+    return ProcessedDocument(
+        task_id=task_id,
+        operation_id=record.operation_id,
+        temp_scan_path=temp_path,
+        file_name=record.final_file_name or final_path.name,
+        file_path=final_path,
+        idempotency_key=record.idempotency_key,
+        idempotent_replay=True,
+    )
+
+
+def _storage_retry_from_idempotency_record(
+    *,
+    task_id: str,
+    operation_id: str,
+    record: IdempotencyRecord,
+    record_path: Path,
+    doc_type: str,
+    document_datetime: datetime | str,
+    document_number: str,
+    storage_settings: StorageSettings,
+) -> ProcessedDocument:
+    if not record.temp_scan_path:
+        raise IdempotencyError(
+            code="idempotency_missing_temp_path",
+            operator_message="Нельзя повторить сохранение: в записи идемпотентности нет временного PDF.",
+            technical_message="Record has no temp_scan_path",
+            idempotency_key=record.idempotency_key,
+            record_path=record_path,
+            record=record.to_dict(),
+        )
+
+    source_path = Path(record.temp_scan_path)
+
+    logger.info(
+        "Idempotent storage retry started operation_id=%s task_id=%s idempotency_key=%s source_path=%s",
+        operation_id,
+        task_id,
+        record.idempotency_key,
+        source_path,
+    )
+
+    current_record = mark_storing(record_path, record) or record
+
+    try:
+        stored_document = store_document(
+            source_path=source_path,
+            doc_type=doc_type,
+            document_datetime=document_datetime,
+            document_number=document_number,
+            settings=storage_settings,
+            operation_id=operation_id,
+        )
+    except StorageError as exc:
+        mark_scanned(record_path, current_record, temp_scan_path=source_path)
+        mark_failed(
+            record_path,
+            current_record,
+            status="scanned",
+            error_code=exc.code,
+            operator_message=exc.operator_message,
+            technical_message=exc.technical_message,
+        )
+        raise
+
+    final_record = mark_succeeded(
+        record_path,
+        current_record,
+        final_file_name=stored_document.file_name,
+        final_file_path=stored_document.file_path,
+    ) or current_record
+
+    result = ProcessedDocument(
+        task_id=task_id,
+        operation_id=operation_id,
+        temp_scan_path=source_path,
+        file_name=stored_document.file_name,
+        file_path=stored_document.file_path,
+        idempotency_key=final_record.idempotency_key,
+        idempotent_replay=False,
+    )
+
+    logger.info(
+        "Idempotent storage retry finished operation_id=%s task_id=%s idempotency_key=%s file_path=%s",
+        operation_id,
+        task_id,
+        final_record.idempotency_key,
+        result.file_path,
+    )
+
+    return result
+
+
 def process_document_scan(
     task_id: int | str,
     doc_type: str,
@@ -111,16 +248,22 @@ def process_document_scan(
     storage_settings: StorageSettings | None = None,
     lock_settings: ScannerLockSettings | None = None,
     use_lock: bool = True,
+    idempotency_key: str | None = None,
+    idempotency_settings: IdempotencySettings | None = None,
 ) -> ProcessedDocument:
     """
     Полный процесс:
 
-    1. Проверяем входные данные для имени.
-    2. Захватываем file lock сканера.
-    3. Сканируем документ во временный PDF.
-    4. Атомарно переносим PDF в архив.
-    5. Освобождаем lock.
-    6. Возвращаем финальное имя и путь.
+    1. Включаем месячные txt-логи.
+    2. Проверяем входные данные для имени.
+    3. Проверяем idempotency_key, если он передан.
+    4. Захватываем file lock сканера.
+    5. Сканируем документ во временный PDF.
+    6. Атомарно переносим PDF в архив.
+    7. Освобождаем lock.
+    8. Возвращаем финальное имя и путь.
+
+    Если idempotency_key уже успешно выполнялся, повторного сканирования не будет.
     """
 
     task_id_str = str(task_id).strip()
@@ -128,6 +271,12 @@ def process_document_scan(
 
     effective_scanner_settings = get_effective_scanner_settings(scanner_settings)
     effective_storage_settings = get_effective_storage_settings(storage_settings)
+    effective_idempotency_settings = get_effective_idempotency_settings(
+        idempotency_settings,
+        effective_scanner_settings,
+    )
+
+    configure_monthly_file_logging_from_env(effective_scanner_settings.incoming_dir)
 
     expected_file_name = prevalidate_before_lock(
         doc_type=doc_type,
@@ -141,12 +290,71 @@ def process_document_scan(
     )
 
     logger.info(
-        "Document scan process started: operation_id=%s task_id=%s expected_file_name=%s lock_path=%s",
+        "Document scan process started: operation_id=%s task_id=%s expected_file_name=%s lock_path=%s idempotency_key=%s",
         operation_id,
         task_id_str,
         expected_file_name,
         lock_path,
+        idempotency_key,
     )
+
+    idempotency_decision = begin_idempotent_operation(
+        idempotency_key=idempotency_key,
+        operation_id=operation_id,
+        task_id=task_id_str,
+        doc_type=doc_type,
+        document_datetime=document_datetime,
+        document_number=document_number,
+        expected_file_name=expected_file_name,
+        settings=effective_idempotency_settings,
+    )
+
+    idempotency_record = idempotency_decision.record
+    idempotency_record_path = idempotency_decision.record_path
+
+    if idempotency_decision.mode == "return_existing":
+        if idempotency_record is None:
+            raise IdempotencyError(
+                code="idempotency_record_missing",
+                operator_message="Не удалось получить сохранённый результат идемпотентной операции.",
+                technical_message="Decision mode return_existing has no record",
+                idempotency_key=idempotency_key,
+            )
+
+        result = _processed_from_existing_idempotency_record(
+            task_id=task_id_str,
+            record=idempotency_record,
+        )
+
+        logger.info(
+            "Document scan process returned existing idempotent result: operation_id=%s task_id=%s idempotency_key=%s file_path=%s",
+            operation_id,
+            task_id_str,
+            idempotency_record.idempotency_key,
+            result.file_path,
+        )
+
+        return result
+
+    if idempotency_decision.mode == "retry_storage":
+        if idempotency_record is None or idempotency_record_path is None:
+            raise IdempotencyError(
+                code="idempotency_retry_record_missing",
+                operator_message="Не удалось повторить сохранение: запись идемпотентности не найдена.",
+                technical_message="Decision mode retry_storage has no record or path",
+                idempotency_key=idempotency_key,
+            )
+
+        return _storage_retry_from_idempotency_record(
+            task_id=task_id_str,
+            operation_id=operation_id,
+            record=idempotency_record,
+            record_path=idempotency_record_path,
+            doc_type=doc_type,
+            document_datetime=document_datetime,
+            document_number=document_number,
+            storage_settings=effective_storage_settings,
+        )
 
     if lock_settings is None:
         lock_settings = ScannerLockSettings()
@@ -161,21 +369,121 @@ def process_document_scan(
     else:
         lock_context = _NullLockContext()
 
-    with lock_context:
-        temp_scan_path = scan_document(
-            task_id=task_id_str,
-            settings=effective_scanner_settings,
-            operation_id=operation_id,
-        )
+    temp_scan_path: Path | None = None
+    current_record = idempotency_record
 
-        stored_document: StoredDocument = store_document(
-            source_path=temp_scan_path,
-            doc_type=doc_type,
-            document_datetime=document_datetime,
-            document_number=document_number,
-            settings=effective_storage_settings,
-            operation_id=operation_id,
+    try:
+        with lock_context:
+            temp_scan_path = scan_document(
+                task_id=task_id_str,
+                settings=effective_scanner_settings,
+                operation_id=operation_id,
+            )
+
+            current_record = mark_scanned(
+                idempotency_record_path,
+                current_record,
+                temp_scan_path=temp_scan_path,
+            ) or current_record
+
+            current_record = mark_storing(
+                idempotency_record_path,
+                current_record,
+            ) or current_record
+
+            stored_document: StoredDocument = store_document(
+                source_path=temp_scan_path,
+                doc_type=doc_type,
+                document_datetime=document_datetime,
+                document_number=document_number,
+                settings=effective_storage_settings,
+                operation_id=operation_id,
+            )
+
+            current_record = mark_succeeded(
+                idempotency_record_path,
+                current_record,
+                final_file_name=stored_document.file_name,
+                final_file_path=stored_document.file_path,
+            ) or current_record
+
+    except ScannerError as exc:
+        status = "failed"
+        if exc.code == "scanner_interrupted":
+            status = "interrupted"
+        elif exc.code == "scanner_timeout":
+            status = "timeout"
+
+        mark_failed(
+            idempotency_record_path,
+            current_record,
+            status=status,  # type: ignore[arg-type]
+            error_code=exc.code,
+            operator_message=exc.operator_message,
+            technical_message=exc.technical_message,
         )
+        logger.error(
+            "Document scan process failed at scanner stage operation_id=%s task_id=%s idempotency_key=%s error_code=%s",
+            operation_id,
+            task_id_str,
+            idempotency_key,
+            exc.code,
+        )
+        raise
+
+    except StorageError as exc:
+        # Если скан уже получен, оставляем record в состоянии scanned.
+        # Следующий запуск с тем же idempotency_key попробует только storage.
+        if temp_scan_path is not None:
+            current_record = mark_scanned(
+                idempotency_record_path,
+                current_record,
+                temp_scan_path=temp_scan_path,
+            ) or current_record
+            mark_failed(
+                idempotency_record_path,
+                current_record,
+                status="scanned",
+                error_code=exc.code,
+                operator_message=exc.operator_message,
+                technical_message=exc.technical_message,
+            )
+        else:
+            mark_failed(
+                idempotency_record_path,
+                current_record,
+                status="failed",
+                error_code=exc.code,
+                operator_message=exc.operator_message,
+                technical_message=exc.technical_message,
+            )
+
+        logger.error(
+            "Document scan process failed at storage stage operation_id=%s task_id=%s idempotency_key=%s error_code=%s temp_scan_path=%s",
+            operation_id,
+            task_id_str,
+            idempotency_key,
+            exc.code,
+            temp_scan_path,
+        )
+        raise
+
+    except Exception as exc:
+        mark_failed(
+            idempotency_record_path,
+            current_record,
+            status="failed",
+            error_code=type(exc).__name__,
+            operator_message="Непредвиденная ошибка при обработке скана.",
+            technical_message=str(exc),
+        )
+        logger.exception(
+            "Document scan process failed unexpectedly operation_id=%s task_id=%s idempotency_key=%s",
+            operation_id,
+            task_id_str,
+            idempotency_key,
+        )
+        raise
 
     processed_document = ProcessedDocument(
         task_id=task_id_str,
@@ -183,14 +491,17 @@ def process_document_scan(
         temp_scan_path=temp_scan_path,
         file_name=stored_document.file_name,
         file_path=stored_document.file_path,
+        idempotency_key=idempotency_key,
+        idempotent_replay=False,
     )
 
     logger.info(
-        "Document scan process finished: operation_id=%s task_id=%s file_name=%s file_path=%s",
+        "Document scan process finished: operation_id=%s task_id=%s file_name=%s file_path=%s idempotency_key=%s",
         operation_id,
         task_id_str,
         processed_document.file_name,
         processed_document.file_path,
+        idempotency_key,
     )
 
     return processed_document
@@ -220,6 +531,7 @@ def retry_store_existing_scan(
     source_path = Path(source_path)
 
     effective_storage_settings = get_effective_storage_settings(storage_settings)
+    configure_monthly_file_logging_from_env()
 
     logger.info(
         "Retry store existing scan started: operation_id=%s task_id=%s source_path=%s",
@@ -266,6 +578,8 @@ def process_document_scan_safe(
     storage_settings: StorageSettings | None = None,
     lock_settings: ScannerLockSettings | None = None,
     use_lock: bool = True,
+    idempotency_key: str | None = None,
+    idempotency_settings: IdempotencySettings | None = None,
 ) -> DocumentProcessResult:
     """
     Безопасная обёртка.
@@ -286,6 +600,8 @@ def process_document_scan_safe(
             storage_settings=storage_settings,
             lock_settings=lock_settings,
             use_lock=use_lock,
+            idempotency_key=idempotency_key,
+            idempotency_settings=idempotency_settings,
         )
 
         return DocumentProcessResult(
@@ -311,6 +627,17 @@ def process_document_scan_safe(
             success=False,
             operation_id=fallback_operation_id,
             stage="naming",
+            error_code=exc.code,
+            operator_message=exc.operator_message,
+            technical_message=exc.technical_message,
+            details=exc.to_log_dict(),
+        )
+
+    except IdempotencyError as exc:
+        return DocumentProcessResult(
+            success=False,
+            operation_id=fallback_operation_id,
+            stage="idempotency",
             error_code=exc.code,
             operator_message=exc.operator_message,
             technical_message=exc.technical_message,

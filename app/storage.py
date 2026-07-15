@@ -311,44 +311,63 @@ def store_document(
         settings.archive_root,
     )
 
-    validate_source_file(source_path)
+    try:
+        validate_source_file(source_path)
 
-    file_name = build_document_filename(
-        doc_type=doc_type,
-        document_datetime=document_datetime,
-        document_number=document_number,
-    )
+        file_name = build_document_filename(
+            doc_type=doc_type,
+            document_datetime=document_datetime,
+            document_number=document_number,
+        )
 
-    destination_dir = build_archive_directory(
-        archive_root=Path(settings.archive_root),
-        doc_type=doc_type,
-        document_datetime=document_datetime,
-    )
+        destination_dir = build_archive_directory(
+            archive_root=Path(settings.archive_root),
+            doc_type=doc_type,
+            document_datetime=document_datetime,
+        )
 
-    ensure_archive_directory(
-        destination_dir=destination_dir,
-        archive_root=Path(settings.archive_root),
-    )
+        ensure_archive_directory(
+            destination_dir=destination_dir,
+            archive_root=Path(settings.archive_root),
+        )
 
-    destination_path = build_unique_destination_path(
-        destination_dir=destination_dir,
-        file_name=file_name,
-    )
+        destination_path = build_unique_destination_path(
+            destination_dir=destination_dir,
+            file_name=file_name,
+        )
 
-    move_file(
-        source_path=source_path,
-        destination_path=destination_path,
-        operation_id=operation_id,
-    )
+        move_file(
+            source_path=source_path,
+            destination_path=destination_path,
+            operation_id=operation_id,
+        )
 
-    logger.info(
-        "Store document completed operation_id=%s file_name=%s file_path=%s",
-        operation_id,
-        destination_path.name,
-        destination_path,
-    )
+        logger.info(
+            "Store document completed operation_id=%s file_name=%s file_path=%s",
+            operation_id,
+            destination_path.name,
+            destination_path,
+        )
 
-    return StoredDocument(
-        file_name=destination_path.name,
-        file_path=destination_path,
-    )
+        return StoredDocument(
+            file_name=destination_path.name,
+            file_path=destination_path,
+        )
+
+    except StorageError as exc:
+        # Важное улучшение для сценария 3.2:
+        # если сканирование уже создало временный PDF, но архив недоступен,
+        # ошибка должна содержать source_path. Тогда оператор/Planfix смогут
+        # показать путь к сохранённому временному файлу и повторить только перенос
+        # без повторного сканирования.
+        if exc.source_path is None:
+            exc.source_path = source_path
+
+        logger.error(
+            "Store document failed operation_id=%s source_path=%s error=%s",
+            operation_id,
+            source_path,
+            exc.to_log_dict(),
+        )
+
+        raise

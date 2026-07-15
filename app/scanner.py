@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import time
 
@@ -138,7 +139,21 @@ class ScannerSettings:
     page_size: str | None = None
     bit_depth: str | None = None
 
-    timeout_seconds: int = 120
+    # Таймаут внешнего процесса NAPS2.
+    # Для рабочего Epson обычно хватает 180 секунд с большим запасом.
+    timeout_seconds: int = 180
+
+    # Сколько ждать stdout/stderr после принудительного завершения NAPS2.
+    timeout_kill_grace_seconds: int = 10
+
+    # Сколько секунд проверять, что процесс действительно завершился после taskkill/kill.
+    verify_process_exit_seconds: int = 5
+
+    # Если NAPS2 упал/завис/был прерван и успел создать временный PDF,
+    # переносим этот недоверенный файл в карантин, а не оставляем в incoming.
+    quarantine_failed_scan_outputs: bool = True
+    failed_scan_dir_name: str = "_failed_runtime"
+
     min_pdf_size_bytes: int = 100
 
     stable_checks: int = 2
@@ -181,7 +196,11 @@ def load_settings_from_env() -> ScannerSettings:
         dpi=int(dpi_value) if dpi_value else None,
         page_size=page_size,
         bit_depth=bit_depth,
-        timeout_seconds=int(os.getenv("SCANNER_TIMEOUT_SECONDS", "120")),
+        timeout_seconds=int(os.getenv("SCANNER_TIMEOUT_SECONDS", "180")),
+        timeout_kill_grace_seconds=int(os.getenv("SCANNER_TIMEOUT_KILL_GRACE_SECONDS", "10")),
+        verify_process_exit_seconds=int(os.getenv("SCANNER_VERIFY_PROCESS_EXIT_SECONDS", "5")),
+        quarantine_failed_scan_outputs=os.getenv("SCANNER_QUARANTINE_FAILED_OUTPUTS", "1").strip() != "0",
+        failed_scan_dir_name=os.getenv("SCANNER_FAILED_SCAN_DIR_NAME", "_failed_runtime"),
         min_pdf_size_bytes=int(os.getenv("SCANNER_MIN_PDF_SIZE_BYTES", "100")),
         naps2_output_encoding=os.getenv("NAPS2_OUTPUT_ENCODING", "").strip() or None,
         min_pdf_pages=int(os.getenv("SCANNER_MIN_PDF_PAGES", "1")),
@@ -194,6 +213,27 @@ def validate_scanner_settings(settings: ScannerSettings) -> None:
             code="invalid_scanner_timeout",
             operator_message="Некорректный таймаут сканирования. Обратитесь к администратору.",
             technical_message=f"timeout_seconds={settings.timeout_seconds}",
+        )
+
+    if settings.timeout_kill_grace_seconds <= 0:
+        raise ScannerInvalidSettingsError(
+            code="invalid_timeout_kill_grace",
+            operator_message="Некорректная настройка завершения зависшего сканирования. Обратитесь к администратору.",
+            technical_message=f"timeout_kill_grace_seconds={settings.timeout_kill_grace_seconds}",
+        )
+
+    if settings.verify_process_exit_seconds <= 0:
+        raise ScannerInvalidSettingsError(
+            code="invalid_process_exit_verify",
+            operator_message="Некорректная настройка проверки завершения процесса сканирования. Обратитесь к администратору.",
+            technical_message=f"verify_process_exit_seconds={settings.verify_process_exit_seconds}",
+        )
+
+    if not settings.failed_scan_dir_name or any(ch in settings.failed_scan_dir_name for ch in "<>:\"/|?*"):
+        raise ScannerInvalidSettingsError(
+            code="invalid_failed_scan_dir_name",
+            operator_message="Некорректная настройка папки аварийных сканов. Обратитесь к администратору.",
+            technical_message=f"failed_scan_dir_name={settings.failed_scan_dir_name!r}",
         )
 
     if settings.min_pdf_size_bytes <= 0:
@@ -562,6 +602,131 @@ def _collect_output_after_kill(
         return stdout_fallback or "", stderr_fallback or ""
 
 
+def verify_process_stopped(
+    process: subprocess.Popen,
+    *,
+    operation_id: str | None = None,
+    max_wait_seconds: int = 5,
+) -> bool:
+    """
+    Проверяет, что запущенный нами NAPS2-процесс действительно завершился.
+
+    Это важно после timeout/прерывания: сервер должен понимать, остался ли
+    внешний процесс жить и может ли он держать сессию сканера.
+    """
+
+    deadline = time.monotonic() + max_wait_seconds
+
+    while time.monotonic() < deadline:
+        return_code = process.poll()
+        if return_code is not None:
+            logger.info(
+                "NAPS2 process stopped operation_id=%s pid=%s return_code=%s",
+                operation_id,
+                process.pid,
+                return_code,
+            )
+            return True
+
+        time.sleep(0.2)
+
+    logger.error(
+        "NAPS2 process still alive after forced termination operation_id=%s pid=%s manual_check_required=1",
+        operation_id,
+        process.pid,
+    )
+    return False
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{path.stem}_{index:03d}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
+
+
+def quarantine_untrusted_output(
+    output_path: Path,
+    *,
+    reason: str,
+    settings: ScannerSettings,
+    operation_id: str | None = None,
+) -> Path | None:
+    """
+    Переносит недоверенный временный результат сканирования в карантин.
+
+    Используется только для аварийных случаев: timeout, KeyboardInterrupt,
+    return_code != 0, невалидный PDF. Успешный PDF при ошибке storage не
+    трогаем — он остаётся в incoming для retry_store_existing_scan().
+    """
+
+    if not settings.quarantine_failed_scan_outputs:
+        logger.info(
+            "Untrusted scan output quarantine disabled operation_id=%s path=%s reason=%s",
+            operation_id,
+            output_path,
+            reason,
+        )
+        return None
+
+    output_path = Path(output_path)
+
+    if not output_path.exists():
+        return None
+
+    if not output_path.is_file():
+        logger.warning(
+            "Untrusted scan output is not a file operation_id=%s path=%s reason=%s",
+            operation_id,
+            output_path,
+            reason,
+        )
+        return None
+
+    safe_reason = re.sub(r"[^A-Za-z0-9_-]+", "_", reason).strip("_") or "scan_failure"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    quarantine_dir = output_path.parent / settings.failed_scan_dir_name / f"{timestamp}_{safe_reason}"
+
+    try:
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        destination_path = _unique_path(quarantine_dir / output_path.name)
+        shutil.move(str(output_path), str(destination_path))
+
+        logger.warning(
+            "Untrusted scan output quarantined operation_id=%s reason=%s source_path=%s quarantine_path=%s",
+            operation_id,
+            reason,
+            output_path,
+            destination_path,
+        )
+        return destination_path
+
+    except OSError as exc:
+        logger.exception(
+            "Failed to quarantine untrusted scan output operation_id=%s reason=%s path=%s error=%s",
+            operation_id,
+            reason,
+            output_path,
+            exc,
+        )
+        return None
+
+
+def _append_quarantine_info(error: ScannerError, quarantine_path: Path | None) -> None:
+    if quarantine_path is None:
+        return
+
+    suffix = f"; quarantined_untrusted_output={quarantine_path}"
+    if suffix not in error.technical_message:
+        error.technical_message = f"{error.technical_message}{suffix}" if error.technical_message else suffix.lstrip("; ")
+
+
 def run_naps2(
     command: list[str],
     settings: ScannerSettings,
@@ -617,22 +782,46 @@ def run_naps2(
             )
 
             kill_process_tree(process=process, operation_id=operation_id)
+            process_stopped = verify_process_stopped(
+                process,
+                operation_id=operation_id,
+                max_wait_seconds=settings.verify_process_exit_seconds,
+            )
 
             stdout, stderr = _collect_output_after_kill(
                 process,
-                timeout_seconds=10,
+                timeout_seconds=settings.timeout_kill_grace_seconds,
                 stdout_fallback=_to_text(exc.stdout, output_encoding),
                 stderr_fallback=_to_text(exc.stderr, output_encoding),
             )
+
+            quarantine_path = quarantine_untrusted_output(
+                output_path,
+                reason="scanner_timeout",
+                settings=settings,
+                operation_id=operation_id,
+            )
+
+            if not process_stopped:
+                logger.error(
+                    "Scanner manual check required after timeout operation_id=%s output_path=%s quarantine_path=%s",
+                    operation_id,
+                    output_path,
+                    quarantine_path,
+                )
 
             raise ScannerTimeoutError(
                 code="scanner_timeout",
                 operator_message=(
                     f"Сканирование не завершилось за {settings.timeout_seconds} секунд. "
-                    "Программа сканирования была принудительно остановлена. "
-                    "Проверьте сканер, сеть и повторите попытку."
+                    "Процесс NAPS2 был принудительно остановлен. "
+                    "Проверьте сканер и повторите попытку. Если ошибка повторяется, выполните диагностику."
                 ),
-                technical_message=f"NAPS2 timeout after {settings.timeout_seconds} seconds",
+                technical_message=(
+                    f"NAPS2 timeout after {settings.timeout_seconds} seconds; "
+                    f"process_stopped={process_stopped}; "
+                    f"quarantine_path={quarantine_path}"
+                ),
                 output_path=output_path,
                 stdout=stdout,
                 stderr=stderr,
@@ -649,9 +838,33 @@ def run_naps2(
             process.pid if process else None,
         )
 
+        process_stopped = True
         if process is not None:
             kill_process_tree(process=process, operation_id=operation_id)
-            stdout, stderr = _collect_output_after_kill(process, timeout_seconds=10)
+            process_stopped = verify_process_stopped(
+                process,
+                operation_id=operation_id,
+                max_wait_seconds=settings.verify_process_exit_seconds,
+            )
+            stdout, stderr = _collect_output_after_kill(
+                process,
+                timeout_seconds=settings.timeout_kill_grace_seconds,
+            )
+
+        quarantine_path = quarantine_untrusted_output(
+            output_path,
+            reason="scanner_interrupted",
+            settings=settings,
+            operation_id=operation_id,
+        )
+
+        if not process_stopped:
+            logger.error(
+                "Scanner manual check required after interruption operation_id=%s output_path=%s quarantine_path=%s",
+                operation_id,
+                output_path,
+                quarantine_path,
+            )
 
         raise ScannerInterruptedError(
             code="scanner_interrupted",
@@ -659,7 +872,10 @@ def run_naps2(
                 "Сканирование было прервано. Процесс NAPS2 принудительно остановлен, "
                 "блокировка сканера должна быть освобождена. Проверьте устройство и повторите попытку."
             ),
-            technical_message="KeyboardInterrupt while NAPS2 scan was running",
+            technical_message=(
+                "KeyboardInterrupt while NAPS2 scan was running; "
+                f"process_stopped={process_stopped}; quarantine_path={quarantine_path}"
+            ),
             output_path=output_path,
             stdout=stdout,
             stderr=stderr,
@@ -696,13 +912,26 @@ def run_naps2(
     )
 
     if known_error:
+        quarantine_path = quarantine_untrusted_output(
+            output_path,
+            reason=known_error.code,
+            settings=settings,
+            operation_id=operation_id,
+        )
+        _append_quarantine_info(known_error, quarantine_path)
         raise known_error
 
     if return_code != 0:
+        quarantine_path = quarantine_untrusted_output(
+            output_path,
+            reason="naps2_process_error",
+            settings=settings,
+            operation_id=operation_id,
+        )
         raise ScannerProcessError(
             code="naps2_process_error",
             operator_message="Программа сканирования завершилась с ошибкой. Повторите попытку или обратитесь к администратору.",
-            technical_message=f"NAPS2 return code: {return_code}",
+            technical_message=f"NAPS2 return code: {return_code}; quarantine_path={quarantine_path}",
             output_path=output_path,
             stdout=stdout,
             stderr=stderr,
@@ -847,10 +1076,21 @@ def scan_document(
         operation_id=operation_id,
     )
 
-    validate_pdf_output(
-        output_path=output_path,
-        settings=settings,
-    )
+    try:
+        validate_pdf_output(
+            output_path=output_path,
+            settings=settings,
+        )
+    except ScannerError as exc:
+        if isinstance(exc, (ScannerOutputInvalidError, ScannerOutputMissingError)):
+            quarantine_path = quarantine_untrusted_output(
+                output_path,
+                reason=exc.code,
+                settings=settings,
+                operation_id=operation_id,
+            )
+            _append_quarantine_info(exc, quarantine_path)
+        raise
 
     logger.info("Scan completed operation_id=%s task_id=%s output_path=%s", operation_id, task_id, output_path)
 

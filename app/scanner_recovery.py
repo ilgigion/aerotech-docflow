@@ -9,7 +9,7 @@ import logging
 import os
 import subprocess
 
-from app.locks import read_lock_info
+from app.locks import is_lock_stale, read_lock_info
 
 
 logger = logging.getLogger(__name__)
@@ -29,19 +29,37 @@ class ScannerStateReport:
     archive_root: Path
     lock_exists: bool
     lock_info: dict[str, Any] | None
+    lock_is_stale: bool
     naps2_processes: list[ProcessInfo]
     incoming_pf_files: list[Path]
+    incoming_failed_runtime_files: list[Path]
     archive_tmp_files: list[Path]
     archive_reserve_files: list[Path]
 
     @property
     def has_risk_markers(self) -> bool:
+        """
+        Признаки, что после аварийного сценария нужна проверка.
+
+        incoming_pf_files сами по себе не считаем риском: это может быть
+        валидный скан, ожидающий retry_store_existing_scan() после ошибки storage.
+        """
+
         return bool(
             self.lock_exists
             or self.naps2_processes
             or self.archive_tmp_files
             or self.archive_reserve_files
         )
+
+
+@dataclass(frozen=True)
+class StaleLockRecoveryResult:
+    lock_path: Path
+    lock_existed: bool
+    removed: bool
+    reason: str
+    lock_info: dict[str, Any] | None
 
 
 def _run_command(command: list[str], timeout_seconds: int = 20) -> subprocess.CompletedProcess:
@@ -144,6 +162,20 @@ def find_incoming_pf_files(incoming_dir: Path, limit: int = 50) -> list[Path]:
     return sorted(incoming_dir.glob("PF_*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
 
 
+def find_incoming_failed_runtime_files(incoming_dir: Path, limit: int = 50) -> list[Path]:
+    incoming_dir = Path(incoming_dir)
+    runtime_dir = incoming_dir / "_failed_runtime"
+
+    if not runtime_dir.exists() or not runtime_dir.is_dir():
+        return []
+
+    return sorted(
+        [path for path in runtime_dir.rglob("*") if path.is_file()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:limit]
+
+
 def find_archive_artifacts(archive_root: Path, pattern: str, limit: int = 100) -> list[Path]:
     archive_root = Path(archive_root)
 
@@ -156,23 +188,91 @@ def find_archive_artifacts(archive_root: Path, pattern: str, limit: int = 100) -
 def diagnose_scanner_state(
     incoming_dir: Path | str = Path(r"D:\incoming"),
     archive_root: Path | str = Path(r"D:\archive_test"),
+    *,
+    lock_stale_after_seconds: int = 30 * 60,
 ) -> ScannerStateReport:
     incoming_dir = Path(incoming_dir)
     archive_root = Path(archive_root)
     lock_path = incoming_dir / ".scanner.lock"
 
     lock_info = read_lock_info(lock_path) if lock_path.exists() else None
+    lock_stale = False
+
+    if lock_info:
+        lock_stale = is_lock_stale(
+            lock_info=lock_info,
+            stale_after_seconds=lock_stale_after_seconds,
+        )
 
     return ScannerStateReport(
         incoming_dir=incoming_dir,
         archive_root=archive_root,
         lock_exists=lock_path.exists(),
         lock_info=lock_info,
+        lock_is_stale=lock_stale,
         naps2_processes=list_naps2_processes(),
         incoming_pf_files=find_incoming_pf_files(incoming_dir),
+        incoming_failed_runtime_files=find_incoming_failed_runtime_files(incoming_dir),
         archive_tmp_files=find_archive_artifacts(archive_root, "*.tmp"),
         archive_reserve_files=find_archive_artifacts(archive_root, "*.reserve"),
     )
+
+
+def recover_stale_lock_if_safe(
+    incoming_dir: Path | str = Path(r"D:\incoming"),
+    *,
+    stale_after_seconds: int = 30 * 60,
+) -> StaleLockRecoveryResult:
+    """
+    Безопасно удаляет только stale-lock.
+
+    Это та же логика, которую основной scanner_lock применяет при следующем
+    сканировании: если lock старый и процесс-владелец уже не жив — его можно снять.
+    """
+
+    incoming_dir = Path(incoming_dir)
+    lock_path = incoming_dir / ".scanner.lock"
+
+    if not lock_path.exists():
+        return StaleLockRecoveryResult(
+            lock_path=lock_path,
+            lock_existed=False,
+            removed=False,
+            reason="lock_missing",
+            lock_info=None,
+        )
+
+    lock_info = read_lock_info(lock_path)
+
+    if not is_lock_stale(lock_info, stale_after_seconds=stale_after_seconds):
+        return StaleLockRecoveryResult(
+            lock_path=lock_path,
+            lock_existed=True,
+            removed=False,
+            reason="lock_not_stale_or_owner_process_alive",
+            lock_info=lock_info,
+        )
+
+    try:
+        lock_path.unlink(missing_ok=True)
+        logger.warning("Stale scanner lock removed by recovery diagnostics lock_path=%s lock_info=%s", lock_path, lock_info)
+        return StaleLockRecoveryResult(
+            lock_path=lock_path,
+            lock_existed=True,
+            removed=True,
+            reason="stale_lock_removed",
+            lock_info=lock_info,
+        )
+
+    except OSError as exc:
+        logger.exception("Failed to remove stale scanner lock lock_path=%s error=%s", lock_path, exc)
+        return StaleLockRecoveryResult(
+            lock_path=lock_path,
+            lock_existed=True,
+            removed=False,
+            reason=f"remove_error: {exc}",
+            lock_info=lock_info,
+        )
 
 
 def remove_scanner_lock(incoming_dir: Path | str = Path(r"D:\incoming")) -> bool:
@@ -216,6 +316,8 @@ def emergency_recover_after_interruption(
     *,
     kill_naps2: bool = True,
     remove_lock: bool = False,
+    remove_stale_lock: bool = False,
+    stale_after_seconds: int = 30 * 60,
     cleanup_artifacts: bool = False,
 ) -> dict[str, Any]:
     """
@@ -225,17 +327,35 @@ def emergency_recover_after_interruption(
     без явного флага, чтобы случайно не повредить активную операцию.
     """
 
-    before = diagnose_scanner_state(incoming_dir, archive_root)
+    before = diagnose_scanner_state(
+        incoming_dir,
+        archive_root,
+        lock_stale_after_seconds=stale_after_seconds,
+    )
 
     result: dict[str, Any] = {
         "before_has_risk_markers": before.has_risk_markers,
         "killed_naps2": [],
         "removed_lock": False,
+        "stale_lock_recovery": None,
         "removed_archive_artifacts": [],
     }
 
     if kill_naps2:
         result["killed_naps2"] = kill_naps2_processes()
+
+    if remove_stale_lock:
+        stale_result = recover_stale_lock_if_safe(
+            incoming_dir=incoming_dir,
+            stale_after_seconds=stale_after_seconds,
+        )
+        result["stale_lock_recovery"] = {
+            "lock_path": str(stale_result.lock_path),
+            "lock_existed": stale_result.lock_existed,
+            "removed": stale_result.removed,
+            "reason": stale_result.reason,
+            "lock_info": stale_result.lock_info,
+        }
 
     if remove_lock:
         result["removed_lock"] = remove_scanner_lock(incoming_dir)
@@ -245,7 +365,11 @@ def emergency_recover_after_interruption(
             str(path) for path in cleanup_archive_artifacts(archive_root)
         ]
 
-    after = diagnose_scanner_state(incoming_dir, archive_root)
+    after = diagnose_scanner_state(
+        incoming_dir,
+        archive_root,
+        lock_stale_after_seconds=stale_after_seconds,
+    )
     result["after_has_risk_markers"] = after.has_risk_markers
 
     return result

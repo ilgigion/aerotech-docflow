@@ -86,6 +86,10 @@ class ScannerTimeoutError(ScannerError):
     pass
 
 
+class ScannerInterruptedError(ScannerError):
+    pass
+
+
 class ScannerBusyError(ScannerError):
     pass
 
@@ -140,6 +144,14 @@ class ScannerSettings:
     stable_checks: int = 2
     stable_interval_seconds: float = 0.5
 
+    # NAPS2 на Windows часто пишет stdout в OEM-кодировке cp866.
+    # Если оставить системную cp1251, русский текст превращается в "кракозябры".
+    naps2_output_encoding: str | None = None
+
+    # Строгую проверку количества страниц делаем только если будет подключена
+    # внешняя PDF-библиотека. Сейчас поле оставлено для будущего расширения.
+    min_pdf_pages: int = 1
+
 
 def load_settings_from_env() -> ScannerSettings:
     profile_name = os.getenv("NAPS2_PROFILE", "").strip()
@@ -171,6 +183,8 @@ def load_settings_from_env() -> ScannerSettings:
         bit_depth=bit_depth,
         timeout_seconds=int(os.getenv("SCANNER_TIMEOUT_SECONDS", "120")),
         min_pdf_size_bytes=int(os.getenv("SCANNER_MIN_PDF_SIZE_BYTES", "100")),
+        naps2_output_encoding=os.getenv("NAPS2_OUTPUT_ENCODING", "").strip() or None,
+        min_pdf_pages=int(os.getenv("SCANNER_MIN_PDF_PAGES", "1")),
     )
 
 
@@ -201,6 +215,13 @@ def validate_scanner_settings(settings: ScannerSettings) -> None:
             code="invalid_stable_interval",
             operator_message="Некорректная настройка проверки файла. Обратитесь к администратору.",
             technical_message=f"stable_interval_seconds={settings.stable_interval_seconds}",
+        )
+
+    if settings.min_pdf_pages <= 0:
+        raise ScannerInvalidSettingsError(
+            code="invalid_min_pdf_pages",
+            operator_message="Некорректная настройка минимального количества страниц PDF. Обратитесь к администратору.",
+            technical_message=f"min_pdf_pages={settings.min_pdf_pages}",
         )
 
     if settings.profile_name:
@@ -360,12 +381,34 @@ def _get_console_encoding() -> str:
     return locale.getpreferredencoding(False) or "utf-8"
 
 
-def _to_text(value: str | bytes | None) -> str:
+def _get_naps2_output_encoding(settings: ScannerSettings | None = None) -> str:
+    """
+    Кодировка stdout/stderr NAPS2.
+
+    На русской Windows NAPS2.Console часто пишет текст в OEM-кодировке cp866,
+    а Python по умолчанию может читать через cp1251. Из-за этого сообщение
+    "В податчике нет листов" превращается в "‚ Ї®¤...".
+    """
+
+    if settings and settings.naps2_output_encoding:
+        return settings.naps2_output_encoding
+
+    env_encoding = os.getenv("NAPS2_OUTPUT_ENCODING", "").strip()
+    if env_encoding:
+        return env_encoding
+
+    if os.name == "nt":
+        return "cp866"
+
+    return _get_console_encoding()
+
+
+def _to_text(value: str | bytes | None, encoding: str | None = None) -> str:
     if value is None:
         return ""
 
     if isinstance(value, bytes):
-        return value.decode(_get_console_encoding(), errors="replace")
+        return value.decode(encoding or _get_console_encoding(), errors="replace")
 
     return str(value)
 
@@ -445,13 +488,14 @@ def kill_process_tree(process: subprocess.Popen, operation_id: str | None = None
     """
     Принудительно завершает процесс NAPS2 и его дочерние процессы.
 
-    На Windows используем taskkill /T /F:
-        /T — завершить дерево процессов
-        /F — принудительно
+    Windows:
+        taskkill /PID <pid> /T /F
+
+    Другие ОС:
+        process.kill()
 
     Важно:
-        мы убиваем только процесс, который сами запустили,
-        по его PID.
+        убиваем только процесс, который запустили сами, по его PID.
     """
 
     if process.poll() is not None:
@@ -463,22 +507,59 @@ def kill_process_tree(process: subprocess.Popen, operation_id: str | None = None
         process.pid,
     )
 
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+            logger.warning(
+                "taskkill finished operation_id=%s pid=%s return_code=%s stdout=%r stderr=%r",
+                operation_id,
+                process.pid,
+                result.returncode,
+                result.stdout,
+                result.stderr,
+            )
+            return
+
+        except Exception as exc:
+            logger.exception(
+                "Failed to kill NAPS2 process tree through taskkill operation_id=%s pid=%s error=%s",
+                operation_id,
+                process.pid,
+                exc,
+            )
+
     try:
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
+        process.kill()
 
     except Exception as exc:
         logger.exception(
-            "Failed to kill NAPS2 process tree operation_id=%s pid=%s error=%s",
+            "Failed to kill NAPS2 process operation_id=%s pid=%s error=%s",
             operation_id,
             process.pid,
             exc,
         )
+
+
+def _collect_output_after_kill(
+    process: subprocess.Popen,
+    *,
+    timeout_seconds: int,
+    stdout_fallback: str = "",
+    stderr_fallback: str = "",
+) -> tuple[str, str]:
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        return stdout or "", stderr or ""
+
+    except subprocess.TimeoutExpired:
+        return stdout_fallback or "", stderr_fallback or ""
 
 
 def run_naps2(
@@ -490,21 +571,26 @@ def run_naps2(
     """
     Запускаем NAPS2 и ждём завершения.
 
-    Важная защита:
-    если NAPS2 зависает дольше timeout_seconds,
-    принудительно завершаем именно запущенный нами процесс.
+    Защиты:
+    - timeout завершает именно запущенный нами NAPS2-процесс;
+    - Ctrl+C / KeyboardInterrupt тоже завершает NAPS2;
+    - lock освобождается выше в document_flow.py через context manager.
     """
 
     start_time = time.monotonic()
+    output_encoding = _get_naps2_output_encoding(settings)
 
     logger.info(
-        "Starting NAPS2 scan operation_id=%s output_path=%s command=%s",
+        "Starting NAPS2 scan operation_id=%s output_path=%s command=%s output_encoding=%s",
         operation_id,
         output_path,
         command,
+        output_encoding,
     )
 
     process: subprocess.Popen | None = None
+    stdout = ""
+    stderr = ""
 
     try:
         process = subprocess.Popen(
@@ -512,48 +598,72 @@ def run_naps2(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            encoding=_get_console_encoding(),
+            encoding=output_encoding,
             errors="replace",
         )
 
         try:
-            stdout, stderr = process.communicate(
-                timeout=settings.timeout_seconds,
-            )
+            stdout, stderr = process.communicate(timeout=settings.timeout_seconds)
 
         except subprocess.TimeoutExpired as exc:
             duration_seconds = round(time.monotonic() - start_time, 3)
 
             logger.error(
-                "NAPS2 timeout operation_id=%s duration_seconds=%s output_path=%s",
+                "NAPS2 timeout operation_id=%s duration_seconds=%s output_path=%s pid=%s",
                 operation_id,
                 duration_seconds,
                 output_path,
+                process.pid,
             )
 
-            kill_process_tree(
-                process=process,
-                operation_id=operation_id,
-            )
+            kill_process_tree(process=process, operation_id=operation_id)
 
-            try:
-                stdout, stderr = process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                stdout = _to_text(exc.stdout)
-                stderr = _to_text(exc.stderr)
+            stdout, stderr = _collect_output_after_kill(
+                process,
+                timeout_seconds=10,
+                stdout_fallback=_to_text(exc.stdout, output_encoding),
+                stderr_fallback=_to_text(exc.stderr, output_encoding),
+            )
 
             raise ScannerTimeoutError(
                 code="scanner_timeout",
                 operator_message=(
                     f"Сканирование не завершилось за {settings.timeout_seconds} секунд. "
                     "Программа сканирования была принудительно остановлена. "
-                    "Проверьте сканер, VPN, сеть и повторите попытку."
+                    "Проверьте сканер, сеть и повторите попытку."
                 ),
                 technical_message=f"NAPS2 timeout after {settings.timeout_seconds} seconds",
                 output_path=output_path,
-                stdout=stdout or "",
-                stderr=stderr or "",
+                stdout=stdout,
+                stderr=stderr,
             ) from exc
+
+    except KeyboardInterrupt as exc:
+        duration_seconds = round(time.monotonic() - start_time, 3)
+
+        logger.warning(
+            "Scan interrupted by user operation_id=%s duration_seconds=%s output_path=%s pid=%s",
+            operation_id,
+            duration_seconds,
+            output_path,
+            process.pid if process else None,
+        )
+
+        if process is not None:
+            kill_process_tree(process=process, operation_id=operation_id)
+            stdout, stderr = _collect_output_after_kill(process, timeout_seconds=10)
+
+        raise ScannerInterruptedError(
+            code="scanner_interrupted",
+            operator_message=(
+                "Сканирование было прервано. Процесс NAPS2 принудительно остановлен, "
+                "блокировка сканера должна быть освобождена. Проверьте устройство и повторите попытку."
+            ),
+            technical_message="KeyboardInterrupt while NAPS2 scan was running",
+            output_path=output_path,
+            stdout=stdout,
+            stderr=stderr,
+        ) from exc
 
     except OSError as exc:
         raise ScannerProcessError(
@@ -599,7 +709,6 @@ def run_naps2(
             return_code=return_code,
         )
 
-
 def wait_until_file_is_stable(
     path: Path,
     required_checks: int,
@@ -624,6 +733,30 @@ def wait_until_file_is_stable(
                 last_size = current_size
 
         time.sleep(interval_seconds)
+
+
+def count_pdf_pages_if_possible(path: Path) -> int | None:
+    """
+    Пытается посчитать страницы PDF, если установлена библиотека pypdf.
+
+    Возвращает:
+        int  — количество страниц;
+        None — pypdf не установлен или PDF не удалось прочитать.
+
+    Мы не делаем это обязательной зависимостью сейчас, чтобы не ломать проект.
+    """
+
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except ImportError:
+        return None
+
+    try:
+        reader = PdfReader(str(path))
+        return len(reader.pages)
+    except Exception as exc:
+        logger.warning("Could not count PDF pages path=%s error=%s", path, exc)
+        return None
 
 
 def validate_pdf_output(output_path: Path, settings: ScannerSettings) -> None:
@@ -669,6 +802,20 @@ def validate_pdf_output(output_path: Path, settings: ScannerSettings) -> None:
             technical_message=f"Invalid PDF header: {header!r}",
             output_path=output_path,
         )
+
+    page_count = count_pdf_pages_if_possible(output_path)
+    if page_count is not None:
+        logger.info("PDF page count checked output_path=%s page_count=%s", output_path, page_count)
+
+        if page_count < settings.min_pdf_pages:
+            raise ScannerOutputInvalidError(
+                code="output_pdf_has_no_pages",
+                operator_message="PDF-файл создан, но в нём нет страниц.",
+                technical_message=f"PDF page count={page_count}, min_pdf_pages={settings.min_pdf_pages}",
+                output_path=output_path,
+            )
+    else:
+        logger.info("PDF page count skipped output_path=%s reason=pypdf_not_available", output_path)
 
 
 def scan_document(

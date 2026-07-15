@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+import json
 import logging
 import os
 import shutil
+import socket
+import time
 import uuid
 
 from app.naming import (
@@ -31,6 +35,7 @@ class StorageError(RuntimeError):
         source_path: Path | None = None,
         destination_path: Path | None = None,
         temp_path: Path | None = None,
+        reservation_path: Path | None = None,
     ):
         super().__init__(operator_message)
 
@@ -40,6 +45,7 @@ class StorageError(RuntimeError):
         self.source_path = source_path
         self.destination_path = destination_path
         self.temp_path = temp_path
+        self.reservation_path = reservation_path
 
     def to_operator_text(self) -> str:
         return self.operator_message
@@ -52,6 +58,7 @@ class StorageError(RuntimeError):
             "source_path": str(self.source_path) if self.source_path else None,
             "destination_path": str(self.destination_path) if self.destination_path else None,
             "temp_path": str(self.temp_path) if self.temp_path else None,
+            "reservation_path": str(self.reservation_path) if self.reservation_path else None,
         }
 
 
@@ -75,6 +82,10 @@ class ArchiveDirectoryCreateError(StorageError):
     pass
 
 
+class DestinationReservationError(StorageError):
+    pass
+
+
 class FileMoveError(StorageError):
     pass
 
@@ -92,12 +103,15 @@ class StorageSettings:
 
     keep_temp_on_error:
         Если True, при ошибке временный .tmp-файл не удаляется.
-        Это удобно только для диагностики.
+
+    reservation_stale_after_seconds:
+        Через сколько секунд .reserve-файл можно считать зависшим.
     """
 
     archive_root: Path = Path(r"D:\archive_test")
     copy_buffer_size: int = 1024 * 1024
     keep_temp_on_error: bool = False
+    reservation_stale_after_seconds: int = 30 * 60
 
 
 @dataclass(frozen=True)
@@ -110,6 +124,24 @@ class StoredDocument:
     file_path: Path
 
 
+@dataclass(frozen=True)
+class DestinationReservation:
+    """
+    Резервирование финального имени файла.
+
+    destination_path:
+        Финальное имя PDF.
+
+    reservation_path:
+        Технический .reserve-файл рядом с destination_path.
+        Он создаётся атомарно и мешает второму процессу выбрать то же имя.
+    """
+
+    destination_path: Path
+    reservation_path: Path
+    operation_id: str | None
+
+
 def load_storage_settings_from_env() -> StorageSettings:
     """
     Настройки storage из переменных окружения.
@@ -119,7 +151,24 @@ def load_storage_settings_from_env() -> StorageSettings:
         archive_root=Path(os.getenv("ARCHIVE_ROOT", r"D:\archive_test")),
         copy_buffer_size=int(os.getenv("STORAGE_COPY_BUFFER_SIZE", str(1024 * 1024))),
         keep_temp_on_error=os.getenv("STORAGE_KEEP_TEMP_ON_ERROR", "0").strip() == "1",
+        reservation_stale_after_seconds=int(
+            os.getenv("STORAGE_RESERVATION_STALE_AFTER_SECONDS", str(30 * 60))
+        ),
     )
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def parse_datetime_utc(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
 
 
 def validate_source_file(source_path: Path) -> None:
@@ -147,11 +196,6 @@ def validate_source_file(source_path: Path) -> None:
 def validate_pdf_file(path: Path, *, min_size_bytes: int = 5) -> None:
     """
     Базовая проверка PDF.
-
-    Проверяем:
-    - файл существует;
-    - файл не пустой;
-    - заголовок начинается с %PDF-.
     """
 
     if not path.exists():
@@ -199,23 +243,18 @@ def build_archive_directory(
 ) -> Path:
     """
     Формирует папку назначения:
-
         archive_root / ГОД / ТИП
     """
 
     parsed_datetime = parse_document_datetime(document_datetime)
     normalized_doc_type = normalize_doc_type(doc_type)
-
     year = parsed_datetime.strftime("%Y")
-
     return archive_root / year / normalized_doc_type
 
 
 def ensure_archive_directory(destination_dir: Path, archive_root: Path) -> None:
     """
-    Проверяем корень архива и автоматически создаём папку назначения:
-
-        archive_root / ГОД / ТИП
+    Проверяем корень архива и создаём папку назначения.
     """
 
     if archive_root.exists() and not archive_root.is_dir():
@@ -228,7 +267,6 @@ def ensure_archive_directory(destination_dir: Path, archive_root: Path) -> None:
 
     try:
         destination_dir.mkdir(parents=True, exist_ok=True)
-
     except OSError as exc:
         raise ArchiveDirectoryCreateError(
             code="archive_directory_create_error",
@@ -246,53 +284,223 @@ def ensure_archive_directory(destination_dir: Path, archive_root: Path) -> None:
         )
 
 
-def build_unique_destination_path(destination_dir: Path, file_name: str) -> Path:
+def build_reservation_path(destination_path: Path) -> Path:
     """
-    Если файл с таким именем уже есть, добавляем суффикс:
+    Резервный файл для финального PDF.
 
+    Пример:
         УПД_260710_101025_2455B.pdf
-        УПД_260710_101025_2455B_01.pdf
-        УПД_260710_101025_2455B_02.pdf
-
-    Параллельный доступ закрывается scanner file lock в document_flow.py.
+        .УПД_260710_101025_2455B.pdf.reserve
     """
 
-    destination_path = destination_dir / file_name
+    return destination_path.with_name(f".{destination_path.name}.reserve")
 
-    if not destination_path.exists():
-        return destination_path
 
-    stem = destination_path.stem
-    suffix = destination_path.suffix
+def read_reservation_info(reservation_path: Path) -> dict[str, Any] | None:
+    if not reservation_path.exists():
+        return None
 
-    for index in range(1, 100):
-        candidate = destination_dir / f"{stem}_{index:02d}{suffix}"
+    try:
+        return json.loads(reservation_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "invalid_reservation_file": True,
+            "error": str(exc),
+        }
 
-        if not candidate.exists():
-            return candidate
 
-    raise FileMoveError(
-        code="too_many_duplicates",
-        operator_message="В архиве уже слишком много файлов с похожим именем.",
-        technical_message=f"Could not build unique name for: {destination_path}",
-        destination_path=destination_path,
+def is_reservation_stale(
+    reservation_path: Path,
+    stale_after_seconds: int,
+) -> bool:
+    """
+    Старый .reserve можно удалить, чтобы он не блокировал имя навсегда.
+    """
+
+    info = read_reservation_info(reservation_path)
+
+    if not info:
+        return False
+
+    if info.get("invalid_reservation_file"):
+        try:
+            age_seconds = time.time() - reservation_path.stat().st_mtime
+            return age_seconds >= stale_after_seconds
+        except OSError:
+            return True
+
+    created_at = parse_datetime_utc(str(info.get("created_at_utc", "")))
+    if created_at is None:
+        try:
+            age_seconds = time.time() - reservation_path.stat().st_mtime
+            return age_seconds >= stale_after_seconds
+        except OSError:
+            return True
+
+    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+    return age_seconds >= stale_after_seconds
+
+
+def create_reservation_file(
+    reservation_path: Path,
+    destination_path: Path,
+    operation_id: str | None,
+) -> None:
+    """
+    Атомарно создаёт .reserve-файл.
+
+    os.O_CREAT | os.O_EXCL гарантирует:
+    если другой процесс уже зарезервировал это имя, текущий процесс получит FileExistsError.
+    """
+
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+
+    reservation_data = {
+        "operation_id": operation_id,
+        "destination_path": str(destination_path),
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "created_at_utc": utc_now_iso(),
+    }
+
+    try:
+        fd = os.open(str(reservation_path), flags)
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        raise DestinationReservationError(
+            code="destination_reservation_create_error",
+            operator_message="Не удалось зарезервировать имя файла в архиве.",
+            technical_message=str(exc),
+            destination_path=destination_path,
+            reservation_path=reservation_path,
+        ) from exc
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(reservation_data, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+    except OSError as exc:
+        raise DestinationReservationError(
+            code="destination_reservation_write_error",
+            operator_message="Не удалось записать резервирование имени файла в архиве.",
+            technical_message=str(exc),
+            destination_path=destination_path,
+            reservation_path=reservation_path,
+        ) from exc
+
+
+def reserve_unique_destination_path(
+    destination_dir: Path,
+    file_name: str,
+    settings: StorageSettings,
+    *,
+    operation_id: str | None = None,
+) -> DestinationReservation:
+    """
+    Безопасно выбирает и резервирует уникальное финальное имя.
+
+    Отличие от простой проверки destination.exists():
+    здесь есть атомарный .reserve-файл, который защищает от гонки двух процессов.
+    """
+
+    base_destination_path = destination_dir / file_name
+    stem = base_destination_path.stem
+    suffix = base_destination_path.suffix
+
+    for index in range(0, 100):
+        if index == 0:
+            candidate = base_destination_path
+        else:
+            candidate = destination_dir / f"{stem}_{index:02d}{suffix}"
+
+        reservation_path = build_reservation_path(candidate)
+
+        if candidate.exists():
+            continue
+
+        if reservation_path.exists():
+            if is_reservation_stale(
+                reservation_path=reservation_path,
+                stale_after_seconds=settings.reservation_stale_after_seconds,
+            ):
+                logger.warning(
+                    "Removing stale destination reservation operation_id=%s reservation_path=%s",
+                    operation_id,
+                    reservation_path,
+                )
+                try:
+                    reservation_path.unlink(missing_ok=True)
+                except OSError:
+                    # Если не смогли удалить, просто пробуем следующее имя.
+                    continue
+            else:
+                continue
+
+        try:
+            create_reservation_file(
+                reservation_path=reservation_path,
+                destination_path=candidate,
+                operation_id=operation_id,
+            )
+
+            logger.info(
+                "Destination reserved operation_id=%s destination_path=%s reservation_path=%s",
+                operation_id,
+                candidate,
+                reservation_path,
+            )
+
+            return DestinationReservation(
+                destination_path=candidate,
+                reservation_path=reservation_path,
+                operation_id=operation_id,
+            )
+
+        except FileExistsError:
+            # Другой процесс успел зарезервировать это имя.
+            continue
+
+    raise DestinationReservationError(
+        code="too_many_duplicates_or_reservations",
+        operator_message="В архиве уже слишком много файлов или резервирований с похожим именем.",
+        technical_message=f"Could not reserve unique name for: {base_destination_path}",
+        destination_path=base_destination_path,
     )
+
+
+def release_destination_reservation(
+    reservation: DestinationReservation,
+    *,
+    operation_id: str | None = None,
+) -> None:
+    """
+    Удаляет .reserve-файл после успеха или ошибки.
+    """
+
+    try:
+        reservation.reservation_path.unlink(missing_ok=True)
+        logger.info(
+            "Destination reservation released operation_id=%s reservation_path=%s",
+            operation_id,
+            reservation.reservation_path,
+        )
+    except OSError as exc:
+        logger.warning(
+            "Failed to release destination reservation operation_id=%s reservation_path=%s error=%s",
+            operation_id,
+            reservation.reservation_path,
+            exc,
+        )
 
 
 def build_atomic_temp_path(destination_path: Path) -> Path:
     """
     Создаёт уникальный путь временного файла рядом с финальным файлом.
-
-    Пример:
-        УПД_260710_101025_2455B.pdf
-        .УПД_260710_101025_2455B.pdf.8f3a1c2b9a11.tmp
     """
 
     token = uuid.uuid4().hex[:12]
-
-    return destination_path.with_name(
-        f".{destination_path.name}.{token}.tmp"
-    )
+    return destination_path.with_name(f".{destination_path.name}.{token}.tmp")
 
 
 def copy_file_to_temp(
@@ -303,9 +511,6 @@ def copy_file_to_temp(
 ) -> None:
     """
     Копирует source_path во временный файл temp_path.
-
-    Открываем temp_path в режиме xb:
-        создать только если файла ещё нет.
     """
 
     try:
@@ -316,10 +521,8 @@ def copy_file_to_temp(
                     fdst=temp_file,
                     length=buffer_size,
                 )
-
                 temp_file.flush()
                 os.fsync(temp_file.fileno())
-
     except OSError as exc:
         raise FileMoveError(
             code="atomic_temp_copy_error",
@@ -342,7 +545,6 @@ def verify_copied_file(
     try:
         source_size = source_path.stat().st_size
         temp_size = temp_path.stat().st_size
-
     except OSError as exc:
         raise FileMoveError(
             code="atomic_temp_verify_stat_error",
@@ -364,7 +566,6 @@ def verify_copied_file(
     try:
         with temp_path.open("rb") as file:
             header = file.read(5)
-
     except OSError as exc:
         raise FileMoveError(
             code="atomic_temp_verify_read_error",
@@ -392,9 +593,8 @@ def finalize_atomic_move(
     Финализирует перенос:
         .tmp -> final.pdf
 
-    В обычном процессе перезаписи быть не должно, потому что:
-        - build_unique_destination_path выбрал свободное имя;
-        - document_flow держит scanner lock.
+    Перед os.replace проверяем, что финальный файл не появился извне.
+    .reserve-файл не является destination_path, поэтому он не мешает.
     """
 
     try:
@@ -408,10 +608,8 @@ def finalize_atomic_move(
             )
 
         os.replace(str(temp_path), str(destination_path))
-
     except FileMoveError:
         raise
-
     except OSError as exc:
         raise FileMoveError(
             code="atomic_finalize_error",
@@ -429,14 +627,10 @@ def remove_source_after_success(
 ) -> None:
     """
     Удаляет исходный временный файл после успешной финализации.
-
-    Если удалить не удалось, финальный архивный файл уже существует.
-    Поэтому не превращаем операцию в ошибку, а пишем warning.
     """
 
     try:
         source_path.unlink(missing_ok=True)
-
     except OSError as exc:
         logger.warning(
             "Final file exists, but source cleanup failed operation_id=%s source_path=%s destination_path=%s error=%s",
@@ -467,7 +661,6 @@ def cleanup_temp_file(
 
     try:
         temp_path.unlink(missing_ok=True)
-
     except OSError as exc:
         logger.warning(
             "Failed to cleanup atomic temp file operation_id=%s temp_path=%s error=%s",
@@ -479,7 +672,7 @@ def cleanup_temp_file(
 
 def atomic_move_file(
     source_path: Path,
-    destination_path: Path,
+    reservation: DestinationReservation,
     settings: StorageSettings,
     *,
     operation_id: str | None = None,
@@ -488,25 +681,23 @@ def atomic_move_file(
     Безопасный перенос файла в архив.
 
     Схема:
-        1. Проверяем source PDF.
-        2. Копируем source во временный .tmp рядом с final.pdf.
-        3. Проверяем размер временной копии.
-        4. Атомарно переименовываем .tmp в final.pdf.
+        1. Есть зарезервированный destination_path.
+        2. Копируем source во временный .tmp рядом с destination_path.
+        3. Проверяем размер и PDF-заголовок .tmp.
+        4. Переименовываем .tmp в destination_path.
         5. Удаляем source из incoming.
-
-    Если ошибка случилась до финального переименования:
-        - source остаётся на месте;
-        - .tmp удаляется, если keep_temp_on_error=False.
     """
 
+    destination_path = reservation.destination_path
     temp_path = build_atomic_temp_path(destination_path)
 
     logger.info(
-        "Atomic move started operation_id=%s source_path=%s temp_path=%s destination_path=%s",
+        "Atomic move started operation_id=%s source_path=%s temp_path=%s destination_path=%s reservation_path=%s",
         operation_id,
         source_path,
         temp_path,
         destination_path,
+        reservation.reservation_path,
     )
 
     try:
@@ -561,8 +752,19 @@ def store_document(
     """
     Главная функция storage.py.
 
-    Внутри используется безопасный перенос:
-        copy -> verify -> atomic rename -> cleanup source.
+    На вход:
+        source_path         — путь к временному PDF
+        doc_type            — тип документа
+        document_datetime   — дата/время документа
+        document_number     — номер документа
+
+    На выход:
+        StoredDocument(file_name, file_path)
+
+    Внутри:
+        1. формируется имя;
+        2. резервируется уникальный destination_path через .reserve;
+        3. выполняется атомарный перенос через .tmp.
     """
 
     if settings is None:
@@ -600,21 +802,30 @@ def store_document(
         archive_root=settings.archive_root,
     )
 
-    destination_path = build_unique_destination_path(
+    reservation = reserve_unique_destination_path(
         destination_dir=destination_dir,
         file_name=file_name,
-    )
-
-    atomic_move_file(
-        source_path=source_path,
-        destination_path=destination_path,
         settings=settings,
         operation_id=operation_id,
     )
 
+    try:
+        atomic_move_file(
+            source_path=source_path,
+            reservation=reservation,
+            settings=settings,
+            operation_id=operation_id,
+        )
+
+    finally:
+        release_destination_reservation(
+            reservation=reservation,
+            operation_id=operation_id,
+        )
+
     stored_document = StoredDocument(
-        file_name=destination_path.name,
-        file_path=destination_path,
+        file_name=reservation.destination_path.name,
+        file_path=reservation.destination_path,
     )
 
     logger.info(

@@ -19,16 +19,17 @@ scanner_settings = ScannerSettings(
     naps2_executable=Path(r"C:\Program Files\NAPS2\NAPS2.Console.exe"),
     incoming_dir=Path(r"D:\incoming"),
 
-    # Для твоей рабочей команды:
-    profile_name=None,
+    # Рекомендуемый режим для duplex + исключения пустых страниц:
+    # настроить это в профиле NAPS2 и запускать профиль.
+    profile_name="EPSON DS-790WN",
+
+    # Эти параметры игнорируются, если profile_name указан.
     driver="escl",
     device_name="EPSON DS-790WN",
-    # EPSON DS-790WN - работа   
-    # Canon G600 series Network - дом
-    source=None,
-    dpi=None,
-    page_size=None,
-    bit_depth=None,
+    source="duplex",
+    dpi=300,
+    page_size="a4",
+    bit_depth="gray",
 
     timeout_seconds=300,
 )
@@ -40,10 +41,7 @@ storage_settings = StorageSettings(
 
 
 lock_settings = ScannerLockSettings(
-    # Если lock_file=None, будет использован:
-    # scanner_settings.incoming_dir / ".scanner.lock"
     lock_file=None,
-
     stale_after_seconds=30 * 60,
     wait_timeout_seconds=0,
     retry_interval_seconds=0.5,
@@ -53,7 +51,7 @@ lock_settings = ScannerLockSettings(
 
 try:
     result = process_document_scan(
-        task_id="TEST_LOCKED_FLOW",
+        task_id="TEST_EPSON_DUPLEX_PROFILE",
         doc_type="УПД",
         document_datetime=datetime(2026, 7, 10, 10, 10, 25),
         document_number="2455B",
@@ -67,7 +65,6 @@ try:
     print("OK")
     print(f"Operation ID: {result.operation_id}")
     print(f"Task ID: {result.task_id}")
-    print(f"Временный путь: {result.temp_scan_path}")
     print(f"Имя файла: {result.file_name}")
     print(f"Финальный путь: {result.file_path}")
 

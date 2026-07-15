@@ -151,6 +151,42 @@ def configure_monthly_file_logging(
 
 
 
+def close_monthly_file_logging(
+    *,
+    log_dir: Path | str | None = None,
+    file_prefix: str | None = None,
+) -> int:
+    """
+    Отключает и закрывает monthly txt logging handlers.
+
+    Нужна для тестов, перезапуска конфигурации и аккуратного завершения
+    приложения на Windows, где открытый файл нельзя удалить/переместить.
+
+    Если log_dir/file_prefix не переданы, закрываются все monthly handlers.
+    Возвращает количество закрытых handlers.
+    """
+
+    root_logger = logging.getLogger()
+    target_log_dir = Path(log_dir) if log_dir is not None else None
+    closed_count = 0
+
+    for handler in list(root_logger.handlers):
+        if not getattr(handler, _HANDLER_MARKER, False):
+            continue
+
+        if target_log_dir is not None and Path(getattr(handler, "log_dir", "")) != target_log_dir:
+            continue
+
+        if file_prefix is not None and getattr(handler, "file_prefix", "") != file_prefix:
+            continue
+
+        root_logger.removeHandler(handler)
+        handler.close()
+        closed_count += 1
+
+    return closed_count
+
+
 def configure_monthly_file_logging_from_env(incoming_dir: Path | str | None = None) -> Path | None:
     """
     Включает месячные txt-логи, если DOCFLOW_MONTHLY_FILE_LOGS не равен 0.

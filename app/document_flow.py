@@ -52,7 +52,7 @@ class ProcessedDocument:
 @dataclass(frozen=True)
 class DocumentProcessResult:
     """
-    Безопасный результат для будущего FastAPI/Planfix.
+    Безопасный результат полного процесса без выбрасывания исключений наружу.
     """
 
     success: bool

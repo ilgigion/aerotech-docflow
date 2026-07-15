@@ -171,7 +171,7 @@ def build_quarantine_run_dir(
     Для каждого запуска создаём отдельную папку карантина.
 
     Пример:
-        D:\incoming\_failed\20260715_103012
+        D:\\incoming\\_failed\\20260715_103012
     """
 
     if run_datetime is None:

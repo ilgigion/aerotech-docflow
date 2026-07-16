@@ -7,9 +7,12 @@ import csv
 import io
 import logging
 import os
+import re
 import subprocess
+import time
 
 from app.locks import is_lock_stale, read_lock_info
+from app.storage import is_reservation_stale, read_reservation_info
 
 
 logger = logging.getLogger(__name__)
@@ -275,23 +278,32 @@ def recover_stale_lock_if_safe(
         )
 
 
-def remove_scanner_lock(incoming_dir: Path | str = Path(r"D:\incoming")) -> bool:
-    lock_path = Path(incoming_dir) / ".scanner.lock"
+def remove_scanner_lock(
+    incoming_dir: Path | str = Path(r"D:\incoming"),
+    *,
+    stale_after_seconds: int = 30 * 60,
+) -> bool:
+    """Compatibility wrapper: remove only a proven stale lock, never force it."""
 
-    if not lock_path.exists():
-        return False
-
-    lock_path.unlink()
-    return True
+    return recover_stale_lock_if_safe(
+        incoming_dir=incoming_dir,
+        stale_after_seconds=stale_after_seconds,
+    ).removed
 
 
 def cleanup_archive_artifacts(
     archive_root: Path | str = Path(r"D:\archive_test"),
+    *,
+    stale_after_seconds: int = 30 * 60,
+    remove_unowned_temp: bool = False,
 ) -> list[Path]:
     """
-    Удаляет .tmp и .reserve в архиве.
+    Удаляет только подтверждённые stale-артефакты нашего приложения.
 
-    Использовать только когда точно нет активного сканирования и NAPS2-процессов.
+    `.reserve` должен содержать корректный JSON, указывать на соседний PDF и
+    принадлежать завершившемуся процессу. `.tmp` не содержит owner metadata,
+    поэтому по умолчанию никогда не удаляется автоматически. Его удаление
+    требует remove_unowned_temp=True и проверки возраста.
     """
 
     archive_root = Path(archive_root)
@@ -300,7 +312,62 @@ def cleanup_archive_artifacts(
     if not archive_root.exists() or not archive_root.is_dir():
         return removed
 
-    for path in list(archive_root.rglob("*.tmp")) + list(archive_root.rglob("*.reserve")):
+    resolved_root = archive_root.resolve(strict=False)
+    candidates: list[Path] = []
+
+    for path in archive_root.rglob("*.reserve"):
+        if not path.is_file() or not path.name.startswith(".") or not path.name.endswith(".pdf.reserve"):
+            continue
+        info = read_reservation_info(path)
+        if not info or info.get("invalid_reservation_file"):
+            continue
+        expected_destination = path.with_name(path.name[1:-len(".reserve")]).resolve(strict=False)
+        try:
+            recorded_destination = Path(str(info.get("destination_path", ""))).resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if recorded_destination != expected_destination:
+            continue
+        if resolved_root not in expected_destination.parents:
+            continue
+        if not is_reservation_stale(path, stale_after_seconds):
+            continue
+        candidates.append(path)
+
+    if remove_unowned_temp:
+        managed_temp_pattern = re.compile(r"^\..+\.pdf\.[0-9a-fA-F]{12}\.tmp$")
+        for path in archive_root.rglob("*.tmp"):
+            if not path.is_file() or not managed_temp_pattern.fullmatch(path.name):
+                continue
+            try:
+                age_seconds = time.time() - path.stat().st_mtime
+            except OSError:
+                continue
+            if age_seconds >= stale_after_seconds:
+                candidates.append(path)
+
+    # A crash between writing reservation JSON and publishing its hard link can
+    # leave a fully written staging file. Unlike PDF copy .tmp files, it carries
+    # owner metadata and can therefore be removed safely without an override.
+    reservation_stage_pattern = re.compile(
+        r"^\.\..+\.pdf\.reserve\.\d+\.[0-9a-fA-F]{12}\.tmp$"
+    )
+    for path in archive_root.rglob("*.tmp"):
+        if not path.is_file() or not reservation_stage_pattern.fullmatch(path.name):
+            continue
+        info = read_reservation_info(path)
+        if not info or info.get("invalid_reservation_file"):
+            continue
+        try:
+            recorded_destination = Path(str(info.get("destination_path", ""))).resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if resolved_root not in recorded_destination.parents:
+            continue
+        if is_reservation_stale(path, stale_after_seconds):
+            candidates.append(path)
+
+    for path in candidates:
         try:
             path.unlink()
             removed.append(path)
@@ -358,7 +425,10 @@ def emergency_recover_after_interruption(
         }
 
     if remove_lock:
-        result["removed_lock"] = remove_scanner_lock(incoming_dir)
+        result["removed_lock"] = remove_scanner_lock(
+            incoming_dir,
+            stale_after_seconds=stale_after_seconds,
+        )
 
     if cleanup_artifacts:
         result["removed_archive_artifacts"] = [

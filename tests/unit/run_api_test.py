@@ -103,6 +103,8 @@ assert failure_response.status_code == 503, failure_response.text
 assert failure_response.json()["status"] == "failed"
 assert failure_response.json()["error_code"] == "scanner_timeout"
 assert failure_response.json()["operation_id"] == "SCAN_TEST_TIMEOUT"
+assert api_module._error_status("scanner_connection_error") == 503
+assert api_module._error_status("scanner_not_found") == 503
 
 
 invalid_response = client.post(

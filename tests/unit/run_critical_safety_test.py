@@ -9,9 +9,12 @@ from pypdf import PdfWriter
 import app.scanner as scanner_module
 from app.locks import ScannerFileLock
 from app.scanner import (
+    ScannerConnectionError,
+    ScannerNoPagesError,
     ScannerOutputInvalidError,
     ScannerProcessStillRunningError,
     ScannerSettings,
+    classify_naps2_error,
     kill_process_tree,
     run_naps2,
     validate_pdf_output,
@@ -102,6 +105,26 @@ with tempfile.TemporaryDirectory() as tmp:
     )
     lock.__exit__(type(still_running_error), still_running_error, None)
     assert lock_path.exists()
+
+
+output_path = Path("classification-output.pdf")
+for connection_output in (
+    "The SSL connection could not be established, see inner exception.\nNo scanned pages to export.",
+    "The server returned an invalid or unrecognized response.\nNo scanned pages to export.",
+    "Выбранный сканер отключён.\nNo scanned pages to export.",
+):
+    classified = classify_naps2_error(connection_output, "", output_path, 1)
+    assert isinstance(classified, ScannerConnectionError)
+    assert classified.code == "scanner_connection_error"
+
+empty_feeder = classify_naps2_error(
+    "В податчике нет листов.\nNo scanned pages to export.",
+    "",
+    output_path,
+    1,
+)
+assert isinstance(empty_feeder, ScannerNoPagesError)
+assert empty_feeder.code == "no_scanned_pages"
 
 
 class FakeProcess:

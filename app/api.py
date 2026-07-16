@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime
 import logging
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -10,12 +12,33 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app import document_flow
-from app.naming import normalize_doc_type, normalize_document_number, normalize_filename_part
+from app.naming import (
+    normalize_doc_type,
+    normalize_document_number,
+    normalize_filename_part,
+)
+from app.production_config import (
+    validate_document_business_rules,
+    validate_runtime_environment,
+)
 
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Aerotech Docflow Local API", version="dev")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    validate_runtime_environment()
+    yield
+
+
+APP_VERSION = os.getenv("DOCFLOW_VERSION", "dev").strip() or "dev"
+
+
+app = FastAPI(
+    title="Aerotech Docflow Local API",
+    version=APP_VERSION,
+    lifespan=lifespan,
+)
 
 
 class ScanRequest(BaseModel):
@@ -66,8 +89,22 @@ def validate_document_identity(payload: ScanRequest) -> None:
     task_part = normalize_filename_part(payload.task_id, "task_id")
     if not task_part:
         raise ValueError("task_id has no usable characters")
-    normalize_doc_type(payload.doc_type)
-    normalize_document_number(payload.document_number)
+    normalized_doc_type = normalize_doc_type(payload.doc_type)
+    normalized_document_number = normalize_document_number(payload.document_number)
+
+    # Lossy normalization creates ambiguous business identities. Reject it at
+    # the HTTP boundary instead of silently mapping two documents to one name.
+    if task_part != payload.task_id:
+        raise ValueError("task_id contains characters that are unsafe or ambiguous")
+    if normalized_doc_type != payload.doc_type:
+        raise ValueError("doc_type must already be in canonical uppercase file-safe form")
+    if normalized_document_number != payload.document_number:
+        raise ValueError("document_number contains characters that are unsafe or ambiguous")
+
+    validate_document_business_rules(
+        doc_type=payload.doc_type,
+        document_datetime=payload.document_datetime,
+    )
 
 
 def _error_status(error_code: str | None) -> int:
@@ -82,6 +119,8 @@ def _error_status(error_code: str | None) -> int:
         return 409
 
     if error_code in {
+        "scanner_connection_error",
+        "scanner_not_found",
         "scanner_timeout",
         "manual_recovery_required",
         "scanner_process_still_running",
@@ -135,7 +174,7 @@ def health() -> dict[str, str]:
         "status": "ok",
         "service": "aerotech-docflow",
         "scanner_api": "local",
-        "version": "dev",
+        "version": APP_VERSION,
     }
 
 
@@ -164,6 +203,7 @@ def scan(payload: ScanRequest) -> ScanSucceededResponse | JSONResponse:
             document_datetime=payload.document_datetime,
             document_number=payload.document_number,
             idempotency_key=effective_idempotency_key,
+            operation_id=request_operation_id,
         )
     except Exception:
         logger.exception(

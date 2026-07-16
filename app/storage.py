@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import json
+import hashlib
 import logging
 import os
 import shutil
@@ -17,6 +18,8 @@ from app.naming import (
     normalize_doc_type,
     parse_document_datetime,
 )
+from app.production_config import load_runtime_safety_config, validate_runtime_environment
+from app.locks import is_process_running
 
 
 logger = logging.getLogger(__name__)
@@ -112,6 +115,10 @@ class StorageSettings:
     copy_buffer_size: int = 1024 * 1024
     keep_temp_on_error: bool = False
     reservation_stale_after_seconds: int = 30 * 60
+    require_existing_archive_root: bool = False
+    allowed_doc_types: frozenset[str] = frozenset()
+    min_document_year: int | None = None
+    max_document_year: int | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +147,8 @@ class DestinationReservation:
     destination_path: Path
     reservation_path: Path
     operation_id: str | None
+    pid: int
+    hostname: str
 
 
 def load_storage_settings_from_env() -> StorageSettings:
@@ -147,13 +156,21 @@ def load_storage_settings_from_env() -> StorageSettings:
     Настройки storage из переменных окружения.
     """
 
+    safety = load_runtime_safety_config()
+    if safety.production:
+        validate_runtime_environment()
+
     return StorageSettings(
-        archive_root=Path(os.getenv("ARCHIVE_ROOT", r"D:\archive_test")),
+        archive_root=safety.archive_root,
         copy_buffer_size=int(os.getenv("STORAGE_COPY_BUFFER_SIZE", str(1024 * 1024))),
         keep_temp_on_error=os.getenv("STORAGE_KEEP_TEMP_ON_ERROR", "0").strip() == "1",
         reservation_stale_after_seconds=int(
             os.getenv("STORAGE_RESERVATION_STALE_AFTER_SECONDS", str(30 * 60))
         ),
+        require_existing_archive_root=safety.production,
+        allowed_doc_types=safety.allowed_doc_types,
+        min_document_year=safety.min_document_year,
+        max_document_year=safety.max_document_year,
     )
 
 
@@ -226,6 +243,8 @@ def validate_pdf_file(path: Path, *, min_size_bytes: int = 5) -> None:
 
     with path.open("rb") as file:
         header = file.read(5)
+        file.seek(max(0, file_size - 4096))
+        tail = file.read()
 
     if header != b"%PDF-":
         raise SourceFileInvalidError(
@@ -234,6 +253,28 @@ def validate_pdf_file(path: Path, *, min_size_bytes: int = 5) -> None:
             technical_message=f"Invalid PDF header: {header!r}",
             source_path=path,
         )
+
+    if b"%%EOF" not in tail:
+        raise SourceFileInvalidError(
+            code="pdf_file_missing_eof",
+            operator_message="PDF-файл не завершён и может быть повреждён.",
+            technical_message="PDF EOF marker is missing from the final 4096 bytes",
+            source_path=path,
+        )
+
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(path), strict=True)
+        if len(reader.pages) < 1:
+            raise ValueError("PDF has no pages")
+    except Exception as exc:
+        raise SourceFileInvalidError(
+            code="pdf_file_parse_error",
+            operator_message="PDF-файл повреждён или имеет некорректную структуру.",
+            technical_message=f"Strict pypdf validation failed: {exc}",
+            source_path=path,
+        ) from exc
 
 
 def build_archive_directory(
@@ -252,10 +293,23 @@ def build_archive_directory(
     return archive_root / year / normalized_doc_type
 
 
-def ensure_archive_directory(destination_dir: Path, archive_root: Path) -> None:
+def ensure_archive_directory(
+    destination_dir: Path,
+    archive_root: Path,
+    *,
+    require_existing_archive_root: bool = False,
+) -> None:
     """
     Проверяем корень архива и создаём папку назначения.
     """
+
+    if require_existing_archive_root and not archive_root.exists():
+        raise ArchiveRootError(
+            code="archive_root_missing",
+            operator_message="Корень боевого архива недоступен или не существует.",
+            technical_message=f"Required archive root does not exist: {archive_root}",
+            destination_path=archive_root,
+        )
 
     if archive_root.exists() and not archive_root.is_dir():
         raise ArchiveRootError(
@@ -263,6 +317,26 @@ def ensure_archive_directory(destination_dir: Path, archive_root: Path) -> None:
             operator_message="Путь архива некорректен.",
             technical_message=f"Archive root is not a directory: {archive_root}",
             destination_path=archive_root,
+        )
+
+    try:
+        resolved_root = archive_root.resolve(strict=False)
+        resolved_destination = destination_dir.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ArchiveRootError(
+            code="archive_path_resolve_error",
+            operator_message="Не удалось безопасно проверить путь архива.",
+            technical_message=str(exc),
+            destination_path=destination_dir,
+        ) from exc
+    if resolved_destination == resolved_root or resolved_root not in resolved_destination.parents:
+        raise ArchiveRootError(
+            code="archive_destination_outside_root",
+            operator_message="Путь назначения выходит за пределы корня архива.",
+            technical_message=(
+                f"Resolved destination={resolved_destination}; root={resolved_root}"
+            ),
+            destination_path=destination_dir,
         )
 
     try:
@@ -274,6 +348,25 @@ def ensure_archive_directory(destination_dir: Path, archive_root: Path) -> None:
             technical_message=str(exc),
             destination_path=destination_dir,
         ) from exc
+
+    try:
+        resolved_after_create = destination_dir.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ArchiveDirectoryCreateError(
+            code="archive_destination_resolve_error",
+            operator_message="Не удалось проверить созданную папку архива.",
+            technical_message=str(exc),
+            destination_path=destination_dir,
+        ) from exc
+    if resolved_root not in resolved_after_create.parents:
+        raise ArchiveRootError(
+            code="archive_destination_outside_root",
+            operator_message="Папка назначения выходит за пределы корня архива.",
+            technical_message=(
+                f"Resolved destination={resolved_after_create}; root={resolved_root}"
+            ),
+            destination_path=destination_dir,
+        )
 
     if not destination_dir.is_dir():
         raise ArchiveDirectoryCreateError(
@@ -301,7 +394,10 @@ def read_reservation_info(reservation_path: Path) -> dict[str, Any] | None:
         return None
 
     try:
-        return json.loads(reservation_path.read_text(encoding="utf-8"))
+        data = json.loads(reservation_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("reservation JSON root is not an object")
+        return data
     except Exception as exc:
         return {
             "invalid_reservation_file": True,
@@ -323,19 +419,20 @@ def is_reservation_stale(
         return False
 
     if info.get("invalid_reservation_file"):
-        try:
-            age_seconds = time.time() - reservation_path.stat().st_mtime
-            return age_seconds >= stale_after_seconds
-        except OSError:
-            return True
+        return False
 
     created_at = parse_datetime_utc(str(info.get("created_at_utc", "")))
     if created_at is None:
-        try:
-            age_seconds = time.time() - reservation_path.stat().st_mtime
-            return age_seconds >= stale_after_seconds
-        except OSError:
-            return True
+        return False
+
+    lock_hostname = str(info.get("hostname", ""))
+    try:
+        lock_pid = int(info.get("pid"))
+    except (TypeError, ValueError):
+        return False
+
+    if lock_hostname == socket.gethostname() and is_process_running(lock_pid):
+        return False
 
     age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
     return age_seconds >= stale_after_seconds
@@ -353,8 +450,6 @@ def create_reservation_file(
     если другой процесс уже зарезервировал это имя, текущий процесс получит FileExistsError.
     """
 
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-
     reservation_data = {
         "operation_id": operation_id,
         "destination_path": str(destination_path),
@@ -363,31 +458,31 @@ def create_reservation_file(
         "created_at_utc": utc_now_iso(),
     }
 
+    temp_path = reservation_path.with_name(
+        f".{reservation_path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp"
+    )
     try:
-        fd = os.open(str(reservation_path), flags)
+        with temp_path.open("x", encoding="utf-8") as file:
+            json.dump(reservation_data, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.link(str(temp_path), str(reservation_path))
     except FileExistsError:
         raise
     except OSError as exc:
         raise DestinationReservationError(
             code="destination_reservation_create_error",
-            operator_message="Не удалось зарезервировать имя файла в архиве.",
+            operator_message="Не удалось атомарно зарезервировать имя файла в архиве.",
             technical_message=str(exc),
             destination_path=destination_path,
             reservation_path=reservation_path,
         ) from exc
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(reservation_data, file, ensure_ascii=False, indent=2)
-            file.write("\n")
-    except OSError as exc:
-        raise DestinationReservationError(
-            code="destination_reservation_write_error",
-            operator_message="Не удалось записать резервирование имени файла в архиве.",
-            technical_message=str(exc),
-            destination_path=destination_path,
-            reservation_path=reservation_path,
-        ) from exc
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def reserve_unique_destination_path(
@@ -455,6 +550,8 @@ def reserve_unique_destination_path(
                 destination_path=candidate,
                 reservation_path=reservation_path,
                 operation_id=operation_id,
+                pid=os.getpid(),
+                hostname=socket.gethostname(),
             )
 
         except FileExistsError:
@@ -477,6 +574,28 @@ def release_destination_reservation(
     """
     Удаляет .reserve-файл после успеха или ошибки.
     """
+
+    current_info = read_reservation_info(reservation.reservation_path)
+    try:
+        current_pid = int(current_info.get("pid", -1)) if current_info else -1
+    except (TypeError, ValueError):
+        current_pid = -1
+    expected_destination = str(reservation.destination_path)
+    if not current_info or (
+        current_info.get("invalid_reservation_file")
+        or str(current_info.get("operation_id")) != str(reservation.operation_id)
+        or str(current_info.get("destination_path")) != expected_destination
+        or str(current_info.get("hostname")) != reservation.hostname
+        or current_pid != reservation.pid
+    ):
+        logger.warning(
+            "Destination reservation not released because ownership changed "
+            "operation_id=%s reservation_path=%s current_info=%s",
+            operation_id,
+            reservation.reservation_path,
+            current_info,
+        )
+        return
 
     try:
         reservation.reservation_path.unlink(missing_ok=True)
@@ -563,6 +682,36 @@ def verify_copied_file(
             temp_path=temp_path,
         )
 
+    def sha256(path: Path) -> bytes:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.digest()
+
+    try:
+        source_digest = sha256(source_path)
+        temp_digest = sha256(temp_path)
+    except OSError as exc:
+        raise FileMoveError(
+            code="atomic_temp_hash_error",
+            operator_message="Не удалось проверить контрольную сумму копии PDF.",
+            technical_message=str(exc),
+            source_path=source_path,
+            temp_path=temp_path,
+        ) from exc
+
+    if source_digest != temp_digest:
+        raise FileMoveError(
+            code="atomic_temp_hash_mismatch",
+            operator_message="Контрольная сумма копии PDF не совпадает с исходным файлом.",
+            technical_message=(
+                f"Source SHA-256={source_digest.hex()}; temp SHA-256={temp_digest.hex()}"
+            ),
+            source_path=source_path,
+            temp_path=temp_path,
+        )
+
     try:
         with temp_path.open("rb") as file:
             header = file.read(5)
@@ -583,6 +732,17 @@ def verify_copied_file(
             source_path=source_path,
             temp_path=temp_path,
         )
+
+    try:
+        validate_pdf_file(temp_path)
+    except SourceFileInvalidError as exc:
+        raise FileMoveError(
+            code="atomic_temp_pdf_invalid",
+            operator_message="Копия PDF в архиве не прошла строгую проверку.",
+            technical_message=exc.technical_message,
+            source_path=source_path,
+            temp_path=temp_path,
+        ) from exc
 
 
 def finalize_atomic_move(
@@ -762,6 +922,7 @@ def store_document(
     settings: StorageSettings | None = None,
     *,
     operation_id: str | None = None,
+    on_destination_reserved: Callable[[Path], None] | None = None,
 ) -> StoredDocument:
     """
     Главная функция storage.py.
@@ -805,6 +966,30 @@ def store_document(
         document_number=document_number,
     )
 
+    normalized_type = normalize_doc_type(doc_type)
+    parsed_datetime = parse_document_datetime(document_datetime)
+    if settings.allowed_doc_types and normalized_type not in settings.allowed_doc_types:
+        raise ArchiveRootError(
+            code="document_type_not_allowed",
+            operator_message="Тип документа не разрешён для этого архива.",
+            technical_message=f"doc_type={normalized_type}",
+            destination_path=settings.archive_root,
+        )
+    if settings.min_document_year is not None and parsed_datetime.year < settings.min_document_year:
+        raise ArchiveRootError(
+            code="document_year_out_of_range",
+            operator_message="Дата документа находится вне разрешённого диапазона.",
+            technical_message=f"year={parsed_datetime.year}; min={settings.min_document_year}",
+            destination_path=settings.archive_root,
+        )
+    if settings.max_document_year is not None and parsed_datetime.year > settings.max_document_year:
+        raise ArchiveRootError(
+            code="document_year_out_of_range",
+            operator_message="Дата документа находится вне разрешённого диапазона.",
+            technical_message=f"year={parsed_datetime.year}; max={settings.max_document_year}",
+            destination_path=settings.archive_root,
+        )
+
     destination_dir = build_archive_directory(
         archive_root=settings.archive_root,
         doc_type=doc_type,
@@ -814,6 +999,7 @@ def store_document(
     ensure_archive_directory(
         destination_dir=destination_dir,
         archive_root=settings.archive_root,
+        require_existing_archive_root=settings.require_existing_archive_root,
     )
 
     reservation = reserve_unique_destination_path(
@@ -824,6 +1010,9 @@ def store_document(
     )
 
     try:
+        if on_destination_reserved is not None:
+            on_destination_reserved(reservation.destination_path)
+
         atomic_move_file(
             source_path=source_path,
             reservation=reservation,

@@ -2,10 +2,16 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 
+from pypdf import PdfWriter
+
 from app.storage import StorageSettings, store_document
 
 def fake_pdf(path: Path, marker: str) -> None:
-    path.write_bytes(b"%PDF-1.4\n" + marker.encode("utf-8") + b"\n%%EOF\n")
+    del marker
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    with path.open("wb") as stream:
+        writer.write(stream)
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)

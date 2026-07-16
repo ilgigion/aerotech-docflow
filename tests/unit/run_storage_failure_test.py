@@ -2,6 +2,8 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 
+from pypdf import PdfWriter
+
 from app.storage import StorageError, StorageSettings, store_document
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -9,7 +11,10 @@ with tempfile.TemporaryDirectory() as tmp:
     incoming = root / "incoming"
     incoming.mkdir()
     source = incoming / "source.pdf"
-    source.write_bytes(b"%PDF-1.4\nunit failure\n%%EOF\n")
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    with source.open("wb") as stream:
+        writer.write(stream)
 
     bad_archive = root / "archive_as_file"
     bad_archive.write_text("not a directory", encoding="utf-8")

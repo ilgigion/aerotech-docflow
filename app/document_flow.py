@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import hashlib
 import logging
 import secrets
 
@@ -33,11 +34,32 @@ from app.storage import (
     StorageSettings,
     StoredDocument,
     load_storage_settings_from_env,
+    remove_source_after_success,
     store_document,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+def _files_have_same_sha256(first: Path, second: Path) -> bool:
+    try:
+        if first.stat().st_size != second.stat().st_size:
+            return False
+    except OSError:
+        return False
+
+    def digest(path: Path) -> bytes:
+        value = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                value.update(chunk)
+        return value.digest()
+
+    try:
+        return secrets.compare_digest(digest(first), digest(second))
+    except OSError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -296,6 +318,77 @@ def _storage_retry_from_idempotency_record(
             record=record.to_dict(),
         )
 
+    planned_final_path: Path | None = None
+    if record.final_file_path:
+        planned_final_path = _resolve_idempotency_path_within(
+            raw_path=record.final_file_path,
+            allowed_root=Path(storage_settings.archive_root),
+            path_kind="final",
+            record=record,
+            record_path=record_path,
+        )
+
+    if planned_final_path is not None and planned_final_path.exists():
+        _validate_idempotency_pdf(
+            path=planned_final_path,
+            path_kind="final",
+            record=record,
+            scanner_settings=scanner_settings,
+            record_path=record_path,
+        )
+        if source_path.exists():
+            _validate_idempotency_pdf(
+                path=source_path,
+                path_kind="temp",
+                record=record,
+                scanner_settings=scanner_settings,
+                record_path=record_path,
+            )
+            if not _files_have_same_sha256(source_path, planned_final_path):
+                raise IdempotencyError(
+                    code="idempotency_published_file_mismatch",
+                    operator_message=(
+                        "Опубликованный PDF не совпадает с временным файлом. "
+                        "Требуется ручная проверка, автоматический повтор остановлен."
+                    ),
+                    technical_message=(
+                        f"Source and planned final differ: source={source_path}; "
+                        f"final={planned_final_path}"
+                    ),
+                    idempotency_key=record.idempotency_key,
+                    record_path=record_path,
+                    record=record.to_dict(),
+                )
+            remove_source_after_success(
+                source_path=source_path,
+                destination_path=planned_final_path,
+                operation_id=operation_id,
+            )
+
+        final_record = mark_succeeded(
+            record_path,
+            record,
+            final_file_name=record.final_file_name or planned_final_path.name,
+            final_file_path=planned_final_path,
+        ) or record
+        logger.warning(
+            "Recovered already published document without duplicate operation_id=%s "
+            "task_id=%s idempotency_key=%s final_file_path=%s",
+            operation_id,
+            task_id,
+            record.idempotency_key,
+            planned_final_path,
+        )
+        return ProcessedDocument(
+            task_id=task_id,
+            operation_id=operation_id,
+            temp_scan_path=source_path,
+            file_name=record.final_file_name or planned_final_path.name,
+            file_path=planned_final_path,
+            idempotency_key=final_record.idempotency_key,
+            idempotent_replay=True,
+        )
+
     _validate_idempotency_pdf(
         path=source_path,
         path_kind="temp",
@@ -314,6 +407,15 @@ def _storage_retry_from_idempotency_record(
 
     current_record = mark_storing(record_path, record) or record
 
+    def remember_destination(destination_path: Path) -> None:
+        nonlocal current_record
+        current_record = mark_storing(
+            record_path,
+            current_record,
+            final_file_name=destination_path.name,
+            final_file_path=destination_path,
+        ) or current_record
+
     try:
         stored_document = store_document(
             source_path=source_path,
@@ -322,6 +424,7 @@ def _storage_retry_from_idempotency_record(
             document_number=document_number,
             settings=storage_settings,
             operation_id=operation_id,
+            on_destination_reserved=remember_destination,
         )
     except StorageError as exc:
         mark_scanned(record_path, current_record, temp_scan_path=source_path)
@@ -375,6 +478,7 @@ def process_document_scan(
     use_lock: bool = True,
     idempotency_key: str | None = None,
     idempotency_settings: IdempotencySettings | None = None,
+    operation_id: str | None = None,
 ) -> ProcessedDocument:
     """
     Полный процесс:
@@ -392,7 +496,7 @@ def process_document_scan(
     """
 
     task_id_str = str(task_id).strip()
-    operation_id = build_operation_id()
+    operation_id = operation_id or build_operation_id()
 
     effective_scanner_settings = get_effective_scanner_settings(scanner_settings)
     effective_storage_settings = get_effective_storage_settings(storage_settings)
@@ -522,6 +626,15 @@ def process_document_scan(
                 current_record,
             ) or current_record
 
+            def remember_destination(destination_path: Path) -> None:
+                nonlocal current_record
+                current_record = mark_storing(
+                    idempotency_record_path,
+                    current_record,
+                    final_file_name=destination_path.name,
+                    final_file_path=destination_path,
+                ) or current_record
+
             stored_document: StoredDocument = store_document(
                 source_path=temp_scan_path,
                 doc_type=doc_type,
@@ -529,6 +642,7 @@ def process_document_scan(
                 document_number=document_number,
                 settings=effective_storage_settings,
                 operation_id=operation_id,
+                on_destination_reserved=remember_destination,
             )
 
             current_record = mark_succeeded(
@@ -711,6 +825,7 @@ def process_document_scan_safe(
     use_lock: bool = True,
     idempotency_key: str | None = None,
     idempotency_settings: IdempotencySettings | None = None,
+    operation_id: str | None = None,
 ) -> DocumentProcessResult:
     """
     Безопасная обёртка.
@@ -719,7 +834,7 @@ def process_document_scan_safe(
     а возвращает DocumentProcessResult.
     """
 
-    fallback_operation_id = build_operation_id()
+    operation_id = operation_id or build_operation_id()
 
     try:
         result = process_document_scan(
@@ -733,6 +848,7 @@ def process_document_scan_safe(
             use_lock=use_lock,
             idempotency_key=idempotency_key,
             idempotency_settings=idempotency_settings,
+            operation_id=operation_id,
         )
 
         return DocumentProcessResult(
@@ -745,7 +861,7 @@ def process_document_scan_safe(
     except ScannerLockError as exc:
         return DocumentProcessResult(
             success=False,
-            operation_id=fallback_operation_id,
+            operation_id=operation_id,
             stage="lock",
             error_code=exc.code,
             operator_message=exc.operator_message,
@@ -756,7 +872,7 @@ def process_document_scan_safe(
     except NamingError as exc:
         return DocumentProcessResult(
             success=False,
-            operation_id=fallback_operation_id,
+            operation_id=operation_id,
             stage="naming",
             error_code=exc.code,
             operator_message=exc.operator_message,
@@ -767,7 +883,7 @@ def process_document_scan_safe(
     except IdempotencyError as exc:
         return DocumentProcessResult(
             success=False,
-            operation_id=fallback_operation_id,
+            operation_id=operation_id,
             stage="idempotency",
             error_code=exc.code,
             operator_message=exc.operator_message,
@@ -778,7 +894,7 @@ def process_document_scan_safe(
     except ScannerError as exc:
         return DocumentProcessResult(
             success=False,
-            operation_id=fallback_operation_id,
+            operation_id=operation_id,
             stage="scanner",
             error_code=exc.code,
             operator_message=exc.operator_message,
@@ -790,7 +906,7 @@ def process_document_scan_safe(
     except StorageError as exc:
         return DocumentProcessResult(
             success=False,
-            operation_id=fallback_operation_id,
+            operation_id=operation_id,
             stage="storage",
             error_code=exc.code,
             operator_message=exc.operator_message,

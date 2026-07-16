@@ -825,6 +825,7 @@ def process_document_scan_safe(
     use_lock: bool = True,
     idempotency_key: str | None = None,
     idempotency_settings: IdempotencySettings | None = None,
+    operation_id: str | None = None,
 ) -> DocumentProcessResult:
     """
     Безопасная обёртка.
@@ -833,7 +834,7 @@ def process_document_scan_safe(
     а возвращает DocumentProcessResult.
     """
 
-    operation_id = build_operation_id()
+    operation_id = operation_id or build_operation_id()
 
     try:
         result = process_document_scan(

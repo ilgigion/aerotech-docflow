@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import logging
 import os
+import re
 import threading
 
 
@@ -27,11 +28,17 @@ class MonthlyTextFileHandler(logging.Handler):
         file_prefix: str = "docflow",
         encoding: str = "utf-8",
         level: int = logging.INFO,
+        max_bytes: int = 0,
+        backup_count: int = 5,
+        retention_months: int = 0,
     ):
         super().__init__(level=level)
         self.log_dir = Path(log_dir)
         self.file_prefix = file_prefix
         self.encoding = encoding
+        self.max_bytes = max_bytes
+        self.backup_count = backup_count
+        self.retention_months = retention_months
         self._lock = threading.RLock()
         self._current_month: str | None = None
         self._stream = None
@@ -43,6 +50,7 @@ class MonthlyTextFileHandler(logging.Handler):
                 self._ensure_stream(record)
                 if self._stream is None:
                     return
+                self._rotate_if_needed(len((message + "\n").encode(self.encoding)))
                 self._stream.write(message + "\n")
                 self._stream.flush()
         except Exception:
@@ -74,6 +82,58 @@ class MonthlyTextFileHandler(logging.Handler):
         log_path = self.log_dir / f"{self.file_prefix}_{month_key}.txt"
         self._stream = log_path.open("a", encoding=self.encoding)
         self._current_month = month_key
+        self._prune_expired_months(record_datetime)
+
+    def _rotate_if_needed(self, incoming_bytes: int) -> None:
+        if self._stream is None or self.max_bytes <= 0:
+            return
+        try:
+            current_size = self._stream.tell()
+        except (OSError, ValueError):
+            return
+        if current_size + incoming_bytes <= self.max_bytes:
+            return
+
+        self._stream.flush()
+        self._stream.close()
+        self._stream = None
+        base_path = self.log_dir / f"{self.file_prefix}_{self._current_month}.txt"
+        if self.backup_count > 0:
+            oldest = base_path.with_name(f"{base_path.name}.{self.backup_count}")
+            oldest.unlink(missing_ok=True)
+            for index in range(self.backup_count - 1, 0, -1):
+                source = base_path.with_name(f"{base_path.name}.{index}")
+                destination = base_path.with_name(f"{base_path.name}.{index + 1}")
+                if source.exists():
+                    os.replace(source, destination)
+            if base_path.exists():
+                os.replace(base_path, base_path.with_name(f"{base_path.name}.1"))
+        else:
+            base_path.unlink(missing_ok=True)
+        self._stream = base_path.open("a", encoding=self.encoding)
+
+    def _prune_expired_months(self, current: datetime) -> None:
+        if self.retention_months <= 0:
+            return
+        current_index = current.year * 12 + current.month - 1
+        minimum_index = current_index - self.retention_months + 1
+        pattern = re.compile(
+            rf"^{re.escape(self.file_prefix)}_(\d{{4}})_(\d{{2}})\.txt(?:\.\d+)?$"
+        )
+        for path in self.log_dir.iterdir():
+            match = pattern.fullmatch(path.name)
+            if not match or not path.is_file():
+                continue
+            year, month = int(match.group(1)), int(match.group(2))
+            if month < 1 or month > 12:
+                continue
+            if year * 12 + month - 1 < minimum_index:
+                try:
+                    path.unlink()
+                except OSError:
+                    # Logging must not break the document flow because an old
+                    # log file is temporarily locked by backup/antivirus.
+                    pass
 
 
 class _SafeExtraFormatter(logging.Formatter):
@@ -108,6 +168,9 @@ def configure_monthly_file_logging(
     log_dir: Path | str,
     level: int = logging.INFO,
     file_prefix: str = "docflow",
+    max_bytes: int = 0,
+    backup_count: int = 5,
+    retention_months: int = 0,
 ) -> Path:
     """
     Подключает monthly txt logging к root logger.
@@ -133,6 +196,9 @@ def configure_monthly_file_logging(
         log_dir=log_dir,
         file_prefix=file_prefix,
         level=level,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
+        retention_months=retention_months,
     )
     setattr(handler, _HANDLER_MARKER, True)
 
@@ -207,4 +273,7 @@ def configure_monthly_file_logging_from_env(incoming_dir: Path | str | None = No
     return configure_monthly_file_logging(
         log_dir=get_default_log_dir(incoming_dir),
         level=level,
+        max_bytes=int(os.getenv("DOCFLOW_LOG_MAX_BYTES", "0")),
+        backup_count=int(os.getenv("DOCFLOW_LOG_BACKUP_COUNT", "5")),
+        retention_months=int(os.getenv("DOCFLOW_LOG_RETENTION_MONTHS", "0")),
     )

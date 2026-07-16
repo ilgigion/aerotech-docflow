@@ -14,6 +14,7 @@ import socket
 import time
 
 from app.naming import normalize_doc_type, normalize_document_number, parse_document_datetime
+from app.locks import is_process_running
 
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,16 @@ IdempotencyDecisionMode = Literal[
     "return_existing",
     "retry_storage",
 ]
+
+VALID_IDEMPOTENCY_STATUSES = {
+    "processing",
+    "scanned",
+    "storing",
+    "succeeded",
+    "failed",
+    "interrupted",
+    "timeout",
+}
 
 
 class IdempotencyError(RuntimeError):
@@ -154,9 +165,12 @@ class IdempotencyRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "IdempotencyRecord":
+        raw_status = str(data.get("status", "failed"))
+        if raw_status not in VALID_IDEMPOTENCY_STATUSES:
+            raise ValueError(f"Unknown idempotency status: {raw_status!r}")
         return cls(
             idempotency_key=str(data.get("idempotency_key", "")),
-            status=str(data.get("status", "failed")),  # type: ignore[arg-type]
+            status=raw_status,  # type: ignore[arg-type]
             operation_id=str(data.get("operation_id", "")),
             task_id=str(data.get("task_id", "")),
             doc_type=str(data.get("doc_type", "")),
@@ -262,12 +276,25 @@ def build_request_fingerprint(
 ) -> str:
     """Строит стабильный fingerprint бизнес-параметров операции."""
 
+    raw_doc_type = str(doc_type).strip()
+    raw_document_number = str(document_number).strip()
+    normalized_doc_type = normalize_doc_type(raw_doc_type)
+    normalized_document_number = normalize_document_number(raw_document_number)
+
+    # Keep the historical fingerprint for already-canonical values so existing
+    # succeeded markers remain replayable after upgrade. Add raw identity only
+    # when normalization is lossy, preventing '/' and '\\' from collapsing into
+    # the same business document.
     canonical = {
         "task_id": str(task_id).strip(),
-        "doc_type": normalize_doc_type(doc_type),
+        "doc_type": normalized_doc_type,
         "document_datetime": parse_document_datetime(document_datetime).isoformat(timespec="seconds"),
-        "document_number": normalize_document_number(document_number),
+        "document_number": normalized_document_number,
     }
+    if raw_doc_type != normalized_doc_type:
+        canonical["doc_type_raw"] = raw_doc_type
+    if raw_document_number != normalized_document_number:
+        canonical["document_number_raw"] = raw_document_number
     payload = json.dumps(
         canonical,
         ensure_ascii=False,
@@ -352,33 +379,32 @@ def write_record(record_path: Path, record: IdempotencyRecord, *, create_only: b
     data = record.to_dict()
 
     if create_only:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        temp_path = record_path.with_name(
+            f".{record_path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+        )
         try:
-            fd = os.open(str(record_path), flags)
+            with temp_path.open("x", encoding="utf-8") as file:
+                json.dump(data, file, ensure_ascii=False, indent=2)
+                file.write("\n")
+                file.flush()
+                os.fsync(file.fileno())
+            os.link(str(temp_path), str(record_path))
+            return
         except FileExistsError:
             raise
         except OSError as exc:
             raise IdempotencyRecordError(
                 code="idempotency_record_create_error",
-                operator_message="Не удалось создать запись идемпотентности.",
+                operator_message="Не удалось атомарно создать запись идемпотентности.",
                 technical_message=str(exc),
                 idempotency_key=record.idempotency_key,
                 record_path=record_path,
             ) from exc
-
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as file:
-                json.dump(data, file, ensure_ascii=False, indent=2)
-                file.write("\n")
-            return
-        except OSError as exc:
-            raise IdempotencyRecordError(
-                code="idempotency_record_write_error",
-                operator_message="Не удалось записать запись идемпотентности.",
-                technical_message=str(exc),
-                idempotency_key=record.idempotency_key,
-                record_path=record_path,
-            ) from exc
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     temp_path = record_path.with_name(f".{record_path.name}.{os.getpid()}.tmp")
     try:
@@ -404,6 +430,8 @@ def write_record(record_path: Path, record: IdempotencyRecord, *, create_only: b
 
 
 def is_record_stale(record: IdempotencyRecord, settings: IdempotencySettings) -> bool:
+    if record.hostname == socket.gethostname() and is_process_running(record.pid):
+        return False
     updated_at = parse_datetime_utc(record.updated_at_utc)
     if updated_at is None:
         return True
@@ -589,25 +617,20 @@ def begin_idempotent_operation(
                 reason="already_succeeded",
             )
 
-        # Запись говорит succeeded, но файла уже нет — лучше разрешить новый скан.
-        logger.warning(
-            "Idempotency succeeded record has missing final file; starting new attempt idempotency_key=%s final_file_path=%s",
-            normalized_key,
-            final_path,
-        )
-        replacement = _new_processing_record(
+        raise IdempotencyError(
+            code="manual_recovery_required",
+            operator_message=(
+                "Операция уже была завершена, но итоговый PDF сейчас недоступен. "
+                "Повторное сканирование остановлено; требуется проверка архива."
+            ),
+            technical_message=(
+                "Succeeded idempotency record has missing or unavailable final file: "
+                f"{final_path}"
+            ),
             idempotency_key=normalized_key,
-            operation_id=operation_id,
-            task_id=str(task_id),
-            doc_type=doc_type,
-            document_datetime=document_datetime,
-            document_number=document_number,
-            expected_file_name=expected_file_name,
-            request_fingerprint=request_fingerprint,
-            attempt=existing.attempt + 1,
+            record_path=record_path,
+            record=existing.to_dict(),
         )
-        write_record(record_path, replacement)
-        return IdempotencyDecision(mode="run_new_scan", record=replacement, record_path=record_path, reason="missing_final_file")
 
     if status == "scanned":
         temp_path = Path(existing.temp_scan_path) if existing.temp_scan_path else None
@@ -618,7 +641,13 @@ def begin_idempotent_operation(
                 operation_id,
                 temp_path,
             )
-            retry_record = _with_updates(existing, status="storing", operation_id=operation_id)
+            retry_record = _with_updates(
+                existing,
+                status="storing",
+                operation_id=operation_id,
+                pid=os.getpid(),
+                hostname=socket.gethostname(),
+            )
             write_record(record_path, retry_record)
             return IdempotencyDecision(mode="retry_storage", record=retry_record, record_path=record_path, reason="scanned_temp_exists")
 
@@ -650,7 +679,13 @@ def begin_idempotent_operation(
         # Старый storing с temp-файлом можно продолжить как retry storage.
         temp_path = Path(existing.temp_scan_path) if existing.temp_scan_path else None
         if status == "storing" and temp_path and temp_path.exists():
-            retry_record = _with_updates(existing, status="storing", operation_id=operation_id)
+            retry_record = _with_updates(
+                existing,
+                status="storing",
+                operation_id=operation_id,
+                pid=os.getpid(),
+                hostname=socket.gethostname(),
+            )
             write_record(record_path, retry_record)
             return IdempotencyDecision(mode="retry_storage", record=retry_record, record_path=record_path, reason="stale_storing_retry")
 

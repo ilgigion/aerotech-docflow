@@ -16,6 +16,9 @@ python -m tests.unit.run_all_unit_tests
 - idempotency;
 - monthly file logging;
 - incoming cleanup.
+- production fail-closed configuration;
+- malformed lock and live-PID stale guards;
+- SHA-256 copy verification and safe recovery cleanup.
 
 ## Manual-тесты со сканером
 

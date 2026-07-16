@@ -8,6 +8,7 @@ from typing import Any
 import json
 import logging
 import os
+import secrets
 import socket
 import time
 
@@ -154,7 +155,13 @@ def read_lock_info(lock_path: Path) -> dict[str, Any] | None:
         return None
 
     try:
-        return json.loads(lock_path.read_text(encoding="utf-8"))
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {
+                "invalid_lock_file": True,
+                "raw_text": lock_path.read_text(encoding="utf-8", errors="replace"),
+            }
+        return data
 
     except json.JSONDecodeError:
         return {
@@ -203,8 +210,8 @@ def is_lock_stale(
     Определяет, можно ли считать lock зависшим.
 
     Логика:
-    - если lock не читается как нормальный JSON — считаем stale;
-    - если нет created_at_utc — считаем stale;
+    - если lock не читается как нормальный JSON — fail-closed, только ручное восстановление;
+    - если нет created_at_utc — fail-closed, только ручное восстановление;
     - если lock моложе stale_after_seconds — не stale;
     - если lock старый и процесс на этой же машине ещё жив — не stale;
     - иначе stale.
@@ -214,13 +221,13 @@ def is_lock_stale(
         return False
 
     if lock_info.get("invalid_lock_file") or lock_info.get("unreadable_lock_file"):
-        return True
+        return False
 
     created_at_raw = str(lock_info.get("created_at_utc", ""))
     created_at = parse_datetime_utc(created_at_raw)
 
     if created_at is None:
-        return True
+        return False
 
     age_seconds = (utc_now() - created_at).total_seconds()
 
@@ -267,24 +274,11 @@ def _write_lock_file_atomically(lock_path: Path, lock_info: LockInfo) -> None:
         и оба решили начать сканирование.
     """
 
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-
+    temp_path = lock_path.with_name(
+        f".{lock_path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    )
     try:
-        fd = os.open(str(lock_path), flags)
-
-    except FileExistsError:
-        raise
-
-    except OSError as exc:
-        raise ScannerLockCreateError(
-            code="scanner_lock_create_error",
-            operator_message="Не удалось создать блокировку сканера.",
-            technical_message=str(exc),
-            lock_path=lock_path,
-        ) from exc
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
+        with temp_path.open("x", encoding="utf-8") as file:
             json.dump(
                 lock_info.to_dict(),
                 file,
@@ -292,15 +286,23 @@ def _write_lock_file_atomically(lock_path: Path, lock_info: LockInfo) -> None:
                 indent=2,
             )
             file.write("\n")
-
+            file.flush()
+            os.fsync(file.fileno())
+        os.link(str(temp_path), str(lock_path))
+    except FileExistsError:
+        raise
     except OSError as exc:
         raise ScannerLockCreateError(
-            code="scanner_lock_write_error",
-            operator_message="Не удалось записать блокировку сканера.",
+            code="scanner_lock_create_error",
+            operator_message="Не удалось атомарно создать блокировку сканера.",
             technical_message=str(exc),
             lock_path=lock_path,
-            lock_info=lock_info.to_dict(),
         ) from exc
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class ScannerFileLock(AbstractContextManager["ScannerFileLock"]):

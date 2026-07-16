@@ -11,6 +11,7 @@ MODULES = [
     "tests.unit.run_operation_id_correlation_test",
     "tests.unit.run_acceptance_runner_test",
     "tests.unit.run_critical_safety_test",
+    "tests.unit.run_archive_hardening_test",
     "tests.unit.run_monthly_file_logging_test",
     "tests.unit.run_incoming_cleanup_test",
     "tests.unit.run_api_test",

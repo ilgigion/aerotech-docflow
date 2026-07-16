@@ -77,7 +77,11 @@ def main() -> None:
         write_json(root / "before_recovery.json", before_recovery)
 
         lock_result = recover_stale_lock_if_safe(root / "incoming", stale_after_seconds=0)
-        removed_artifacts = cleanup_archive_artifacts(root / "archive")
+        removed_artifacts = cleanup_archive_artifacts(
+            root / "archive",
+            stale_after_seconds=0,
+            remove_unowned_temp=True,
+        )
         recovery = {
             "lock_existed": lock_result.lock_existed,
             "lock_removed": lock_result.removed,

@@ -129,6 +129,8 @@ python -m tests.manual.run_scan_epson_escl_duplex
 - `docs/04_FAILURE_RECOVERY.md` — восстановление после аварий.
 - `docs/05_STORAGE_AND_IDEMPOTENCY.md` — архив, `.tmp`, `.reserve`, идемпотентность.
 - `docs/06_LOCAL_API.md` — контракт и эксплуатация локального HTTP API.
+- `docs/07_ACCEPTANCE_TESTING.md` — приёмка перед production с логами и доказательствами.
+- `docs/08_RELEASE_CANDIDATE_2026-07-16.md` — исправления, найденные при приёмке, и статус release candidate.
 - `docs/99_CLEAN_MAIN.md` — как сделать эту чистую версию веткой `main`.
 
 ## Структура проекта

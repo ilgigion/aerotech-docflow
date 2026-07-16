@@ -82,6 +82,8 @@ def _error_status(error_code: str | None) -> int:
         return 409
 
     if error_code in {
+        "scanner_connection_error",
+        "scanner_not_found",
         "scanner_timeout",
         "manual_recovery_required",
         "scanner_process_still_running",

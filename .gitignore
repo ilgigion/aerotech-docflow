@@ -30,6 +30,7 @@ _failed_runtime/
 .pytest_cache/
 .coverage
 htmlcov/
+acceptance_runs/
 
 # IDE/editor
 .idea/

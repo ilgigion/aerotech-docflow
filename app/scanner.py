@@ -467,6 +467,34 @@ def classify_naps2_error(
 ) -> ScannerError | None:
     combined = f"{stdout}\n{stderr}".lower()
 
+    connection_markers = (
+        "the ssl connection could not be established",
+        "the server returned an invalid or unrecognized response",
+        "selected scanner is disconnected",
+        "selected scanner is offline",
+        "выбранный сканер отключён",
+        "выбранный сканер отключен",
+        "network is unreachable",
+        "connection refused",
+    )
+    matched_connection_marker = next(
+        (marker for marker in connection_markers if marker in combined),
+        None,
+    )
+    if matched_connection_marker is not None:
+        return ScannerConnectionError(
+            code="scanner_connection_error",
+            operator_message=(
+                "Сканер недоступен по сети. Проверьте VPN, сетевое подключение "
+                "и состояние сканера, затем повторите попытку."
+            ),
+            technical_message=f"NAPS2 connection marker: {matched_connection_marker}",
+            output_path=output_path,
+            stdout=stdout,
+            stderr=stderr,
+            return_code=return_code,
+        )
+
     if "no scanned pages" in combined:
         return ScannerNoPagesError(
             code="no_scanned_pages",

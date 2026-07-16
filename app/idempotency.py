@@ -700,12 +700,28 @@ def mark_scanned(record_path: Path | None, record: IdempotencyRecord | None, *, 
 
 
 
-def mark_storing(record_path: Path | None, record: IdempotencyRecord | None) -> IdempotencyRecord | None:
+def mark_storing(
+    record_path: Path | None,
+    record: IdempotencyRecord | None,
+    *,
+    final_file_name: str | None = None,
+    final_file_path: Path | str | None = None,
+) -> IdempotencyRecord | None:
     if record_path is None or record is None:
         return None
-    updated = _with_updates(record, status="storing")
+    changes: dict[str, Any] = {"status": "storing"}
+    if final_file_name is not None:
+        changes["final_file_name"] = final_file_name
+    if final_file_path is not None:
+        changes["final_file_path"] = str(final_file_path)
+    updated = _with_updates(record, **changes)
     write_record(record_path, updated)
-    logger.info("Idempotency marked storing idempotency_key=%s operation_id=%s", updated.idempotency_key, updated.operation_id)
+    logger.info(
+        "Idempotency marked storing idempotency_key=%s operation_id=%s final_file_path=%s",
+        updated.idempotency_key,
+        updated.operation_id,
+        updated.final_file_path,
+    )
     return updated
 
 

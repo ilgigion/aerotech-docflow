@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import json
 import logging
 import os
@@ -762,6 +762,7 @@ def store_document(
     settings: StorageSettings | None = None,
     *,
     operation_id: str | None = None,
+    on_destination_reserved: Callable[[Path], None] | None = None,
 ) -> StoredDocument:
     """
     Главная функция storage.py.
@@ -824,6 +825,9 @@ def store_document(
     )
 
     try:
+        if on_destination_reserved is not None:
+            on_destination_reserved(reservation.destination_path)
+
         atomic_move_file(
             source_path=source_path,
             reservation=reservation,

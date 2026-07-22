@@ -17,6 +17,7 @@ import httpx
 from pypdf import PdfWriter
 
 import app.storage as storage_module
+from app.configuration import load_config_environment
 from app.storage import StorageError, StorageSettings, store_document
 
 
@@ -345,14 +346,14 @@ def run_storage_acceptance_probes(run_dir: Path) -> dict[str, Any]:
 
 def create_server_script(run_dir: Path, manifest: dict[str, Any]) -> None:
     paths = manifest["test_environment"]
+    config_path = manifest["runtime_config"]
     script = f'''$ErrorActionPreference = "Stop"
-$env:NAPS2_EXECUTABLE = "C:\\Program Files\\NAPS2\\NAPS2.Console.exe"
-$env:NAPS2_PROFILE = "EPSON DS-790WN"
+$env:DOCFLOW_CONFIG_FILE = "{config_path}"
+$env:DOCFLOW_ENV = "development"
 $env:SCANNER_INCOMING_DIR = "{paths['incoming']}"
 $env:ARCHIVE_ROOT = "{paths['archive']}"
 $env:DOCFLOW_LOG_DIR = "{paths['server_logs']}"
 $env:DOCFLOW_IDEMPOTENCY_DIR = "{paths['idempotency']}"
-$env:SCANNER_TIMEOUT_SECONDS = "300"
 
 Write-Host "ACCEPTANCE RUN: {manifest['run_id']}"
 Write-Host "TEST ARCHIVE: $env:ARCHIVE_ROOT"
@@ -363,7 +364,7 @@ Set-Location "{PROJECT_ROOT}"
     (run_dir / "start_test_api.ps1").write_text(script, encoding="utf-8-sig")
 
 
-def create_scenario12_script(run_dir: Path) -> None:
+def create_scenario12_script(run_dir: Path, health_url: str) -> None:
     script = f'''param(
     [ValidateRange(1, 20)]
     [int]$StartAt = 1
@@ -373,11 +374,10 @@ $ErrorActionPreference = "Stop"
 $run = "{run_dir}"
 $python = "{sys.executable}"
 $scenarioRoot = Join-Path $run "scenario_12\\manual_attempts"
-$baseDate = [datetime]::Today.AddHours(13)
 $docType = [string]([char]0x041D) + [string]([char]0x041A) + [string]([char]0x041B)
 
 try {{
-    $health = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8000/health" -TimeoutSec 5
+    $health = Invoke-RestMethod -Method Get -Uri "{health_url}" -TimeoutSec 5
 }} catch {{
     throw "Test API is unavailable. Restart start_test_api.ps1 after disabling VPN. $($_.Exception.Message)"
 }}
@@ -389,7 +389,6 @@ for ($index = $StartAt; $index -le 20; $index++) {{
     $number = "{{0:D3}}" -f $index
     $taskId = "ACC-012-$number"
     $documentNumber = "012-$number"
-    $documentDatetime = $baseDate.AddMinutes($index - 1).ToString("yyyy-MM-ddTHH:mm:ss")
 
     while ($true) {{
         $confirmation = Read-Host "[$index/20] Load document $number. Type SCAN to start, Q to stop"
@@ -406,7 +405,6 @@ for ($index = $StartAt; $index -le 20; $index++) {{
         --scenario 12 `
         --task-id $taskId `
         --doc-type $docType `
-        --document-datetime $documentDatetime `
         --document-number $documentNumber `
         --confirm-real-scan
 
@@ -450,7 +448,7 @@ def create_manual_plan(run_dir: Path) -> None:
         "Пример запроса:",
         "",
         "```powershell",
-        f'python -m tests.acceptance.run_acceptance_tests request --run "{run_dir}" --scenario 1 --task-id "ACC-001" --doc-type "НКЛ" --document-datetime "2026-07-16T12:00:00" --document-number "001" --confirm-real-scan',
+        f'python -m tests.acceptance.run_acceptance_tests request --run "{run_dir}" --scenario 1 --task-id "ACC-001" --doc-type "НКЛ" --document-number "001" --confirm-real-scan',
         "```",
         "",
         "Пример фиксации результата:",
@@ -489,13 +487,27 @@ def validate_run_dir(value: str | Path) -> tuple[Path, dict[str, Any]]:
     return run_dir, manifest
 
 
-def start_run(runs_root: Path) -> Path:
+def start_run(runs_root: Path, config_path: Path) -> Path:
+    config_path = config_path.expanduser().resolve(strict=True)
+    if not config_path.is_file():
+        raise SystemExit(f"Configuration file not found: {config_path}")
+    config_values = load_config_environment(config_path)
+    api_host = config_values.get("DOCFLOW_HOST", "").strip()
+    if api_host not in {"127.0.0.1", "localhost"}:
+        raise SystemExit("Acceptance config must use localhost-only application.host")
+    try:
+        api_port = int(config_values["DOCFLOW_PORT"])
+    except (KeyError, ValueError) as exc:
+        raise SystemExit("Acceptance config must define a valid application.port") from exc
+    api_base_url = f"http://{api_host}:{api_port}"
     _, commit = git_output("rev-parse", "HEAD")
     short_commit = commit[:8] if commit else "no-git"
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{short_commit}"
     run_dir = runs_root.resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     configure_logging(run_dir / "acceptance.log")
+    runtime_config_path = run_dir / "runtime_config.toml"
+    runtime_config_path.write_bytes(config_path.read_bytes())
 
     _, status = git_output("status", "--porcelain=v1")
     _, branch = git_output("branch", "--show-current")
@@ -535,6 +547,11 @@ def start_run(runs_root: Path) -> Path:
             "executable": sys.executable,
             "platform": platform.platform(),
         },
+        "runtime_config": str(runtime_config_path),
+        "api": {
+            "health_url": f"{api_base_url}/health",
+            "scan_url": f"{api_base_url}/scan",
+        },
         "test_environment": {
             "root": str(environment_root),
             "incoming": str(incoming),
@@ -563,14 +580,14 @@ def start_run(runs_root: Path) -> Path:
     automated["storage_probes"] = run_storage_acceptance_probes(run_dir)
     write_json(run_dir / "automated" / "summary.json", automated)
     create_server_script(run_dir, manifest)
-    create_scenario12_script(run_dir)
+    create_scenario12_script(run_dir, manifest["api"]["health_url"])
     create_manual_plan(run_dir)
     finalize_run(run_dir, manifest, log_already_configured=True)
     return run_dir
 
 
 def request_scan(args: argparse.Namespace) -> None:
-    run_dir, _ = validate_run_dir(args.run)
+    run_dir, manifest = validate_run_dir(args.run)
     configure_logging(run_dir / "acceptance.log")
     if not args.confirm_real_scan:
         raise SystemExit("Для физического запроса требуется флаг --confirm-real-scan")
@@ -578,7 +595,6 @@ def request_scan(args: argparse.Namespace) -> None:
     payload = {
         "task_id": args.task_id,
         "doc_type": args.doc_type,
-        "document_datetime": args.document_datetime,
         "document_number": args.document_number,
         "idempotency_key": args.idempotency_key,
     }
@@ -594,12 +610,13 @@ def request_scan(args: argparse.Namespace) -> None:
     attempt_dir.mkdir(parents=True, exist_ok=False)
     write_json(attempt_dir / "input.json", payload)
     write_json(attempt_dir / "archive_before.json", snapshot_files(Path(read_json(run_dir / "manifest.json")["test_environment"]["archive"])))
-    command_text = f"POST {args.url}\nContent-Type: application/json\n"
+    request_url = args.url or manifest["api"]["scan_url"]
+    command_text = f"POST {request_url}\nContent-Type: application/json\n"
     (attempt_dir / "command.txt").write_text(command_text, encoding="utf-8")
 
     logger.info("Sending manual acceptance request: scenario=%s task_id=%s", args.scenario, args.task_id)
     try:
-        response = post_local_scan_request(args.url, payload, args.timeout)
+        response = post_local_scan_request(request_url, payload, args.timeout)
         response_record = {
             "http_status": response.status_code,
             "headers": dict(response.headers),
@@ -814,16 +831,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     start = subparsers.add_parser("start", help="Создать прогон и выполнить безопасную автоматическую часть")
     start.add_argument("--runs-root", type=Path, default=DEFAULT_RUNS_ROOT)
+    start.add_argument("--config", type=Path, required=True)
 
     request = subparsers.add_parser("request", help="Отправить ручной scan-запрос и сохранить доказательства")
     request.add_argument("--run", required=True)
     request.add_argument("--scenario", required=True, type=int, choices=range(1, 13))
     request.add_argument("--task-id", required=True)
     request.add_argument("--doc-type", required=True)
-    request.add_argument("--document-datetime", required=True)
     request.add_argument("--document-number", required=True)
     request.add_argument("--idempotency-key")
-    request.add_argument("--url", default="http://127.0.0.1:8000/scan")
+    request.add_argument("--url")
     request.add_argument("--timeout", type=float, default=360.0)
     request.add_argument("--confirm-real-scan", action="store_true")
 
@@ -844,7 +861,9 @@ def main() -> None:
     args = parser.parse_args()
     command = args.command or "start"
     if command == "start":
-        run_dir = start_run(getattr(args, "runs_root", DEFAULT_RUNS_ROOT))
+        if not hasattr(args, "config"):
+            parser.error("start requires --config")
+        run_dir = start_run(getattr(args, "runs_root", DEFAULT_RUNS_ROOT), args.config)
         print(f"Acceptance evidence: {run_dir}")
     elif command == "request":
         request_scan(args)

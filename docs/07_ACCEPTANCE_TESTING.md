@@ -68,7 +68,6 @@ python -m tests.acceptance.run_acceptance_tests request `
   --scenario 1 `
   --task-id "ACC-001" `
   --doc-type "НКЛ" `
-  --document-datetime "2026-07-16T12:00:00" `
   --document-number "001" `
   --confirm-real-scan
 ```

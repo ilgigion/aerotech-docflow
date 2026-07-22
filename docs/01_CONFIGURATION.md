@@ -1,6 +1,29 @@
 # 01. Конфигурация
 
-Все рабочие пути и параметры должны задаваться через переменные окружения или настройки запуска. Пример находится в `.env.example`. Сам Python-код `.env` не загружает: переменные должен передать Windows service, PowerShell или другой launcher.
+Все рабочие пути и параметры задаются через `config.toml` либо переменные
+окружения. Полный пример находится в `config.example.toml`; прежний контракт
+переменных перечислен в `.env.example`.
+
+Приоритет:
+
+```text
+переменная окружения
+→ config.toml
+→ встроенное значение только для алгоритмических параметров
+```
+
+Пути архива, incoming, NAPS2, логов и idempotency не имеют скрытых
+machine-specific fallback. При их отсутствии runtime завершается ошибкой.
+
+Путь к TOML передаётся через `--config`, `DOCFLOW_CONFIG_FILE` либо по умолчанию
+равен `C:\ProgramData\Aerotech Docflow\config\config.toml`. Неизвестные ключи и
+невалидный TOML приводят к отказу запуска. Сам Python-код `.env` не загружает.
+
+Проверка эффективных значений:
+
+```powershell
+python -m app.cli --config .\config.toml show-config
+```
 
 ## Рекомендуемые параметры для текущего рабочего сканера
 
@@ -82,7 +105,10 @@ $env:DOCFLOW_IDEMPOTENCY_DIR = "D:\incoming\_idempotency"
 Проверка без запуска сканера и без записи в архив:
 
 ```powershell
-python -m app.preflight
+python -m app.cli --config .\config.toml preflight
 ```
 
 Только после результата `status: ok` запускайте API.
+
+Подробная установка EXE и Windows-службы описана в
+`docs/10_WINDOWS_INSTALLATION_AND_SERVICE.md`.

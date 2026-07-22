@@ -1,12 +1,16 @@
-from datetime import datetime
-from pathlib import Path
+"""Legacy manual entry point; all scanner and archive settings come from TOML."""
+
+from __future__ import annotations
+
+import argparse
 import logging
 
+from app.configuration import apply_configuration
 from app.document_flow import process_document_scan
-from app.locks import ScannerLockError, ScannerLockSettings
+from app.locks import ScannerLockError
 from app.naming import NamingError
-from app.scanner import ScannerError, ScannerSettings
-from app.storage import StorageError, StorageSettings
+from app.scanner import ScannerError
+from app.storage import StorageError
 
 
 logging.basicConfig(
@@ -14,80 +18,33 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", required=True)
+parser.add_argument("--task-id", required=True)
+parser.add_argument("--doc-type", required=True)
+parser.add_argument("--document-number", required=True)
+parser.add_argument("--idempotency-key")
+args = parser.parse_args()
 
-scanner_settings = ScannerSettings(
-    naps2_executable=Path(r"C:\Program Files\NAPS2\NAPS2.Console.exe"),
-    incoming_dir=Path(r"D:\incoming"),
-
-    # Рекомендуемый режим для duplex + исключения пустых страниц:
-    # настроить это в профиле NAPS2 и запускать профиль.
-    profile_name="EPSON DS-790WN",
-
-    # Эти параметры игнорируются, если profile_name указан.
-    driver="escl",
-    device_name="EPSON DS-790WN",
-    source="duplex",
-    dpi=300,
-    page_size="a4",
-    bit_depth="gray",
-
-    timeout_seconds=300,
-)
-
-
-storage_settings = StorageSettings(
-    archive_root=Path(r"D:\archive_test"),
-)
-
-
-lock_settings = ScannerLockSettings(
-    lock_file=None,
-    stale_after_seconds=30 * 60,
-    wait_timeout_seconds=0,
-    retry_interval_seconds=0.5,
-    allow_stale_takeover=True,
-)
-
+apply_configuration(args.config)
 
 try:
     result = process_document_scan(
-        task_id="TEST_EPSON_DUPLEX_PROFILE",
-        doc_type="УПД",
-        document_datetime=datetime(2026, 7, 10, 10, 10, 25),
-        document_number="2455B",
-        scanner_settings=scanner_settings,
-        storage_settings=storage_settings,
-        lock_settings=lock_settings,
-        use_lock=True,
+        task_id=args.task_id,
+        doc_type=args.doc_type,
+        document_number=args.document_number,
+        idempotency_key=args.idempotency_key,
     )
-
-    print()
     print("OK")
     print(f"Operation ID: {result.operation_id}")
     print(f"Task ID: {result.task_id}")
     print(f"Имя файла: {result.file_name}")
     print(f"Финальный путь: {result.file_path}")
-
 except ScannerLockError as exc:
-    print()
-    print("СКАНЕР ЗАНЯТ")
-    print(exc.to_operator_text())
-    print(exc.to_log_dict())
-
+    print("СКАНЕР ЗАНЯТ", exc.to_operator_text(), exc.to_log_dict(), sep="\n")
 except ScannerError as exc:
-    print()
-    print("ОШИБКА СКАНИРОВАНИЯ")
-    print(exc.to_operator_text())
-    print(exc.to_log_dict())
-
+    print("ОШИБКА СКАНИРОВАНИЯ", exc.to_operator_text(), exc.to_log_dict(), sep="\n")
 except NamingError as exc:
-    print()
-    print("ОШИБКА ФОРМИРОВАНИЯ ИМЕНИ")
-    print(exc.to_operator_text())
-    print(exc.to_log_dict())
-
+    print("ОШИБКА ФОРМИРОВАНИЯ ИМЕНИ", exc.to_operator_text(), exc.to_log_dict(), sep="\n")
 except StorageError as exc:
-    print()
-    print("ОШИБКА СОХРАНЕНИЯ В АРХИВ")
-    print(exc.to_operator_text())
-    print(exc.to_log_dict())
+    print("ОШИБКА СОХРАНЕНИЯ В АРХИВ", exc.to_operator_text(), exc.to_log_dict(), sep="\n")

@@ -111,7 +111,7 @@ class StorageSettings:
         Через сколько секунд .reserve-файл можно считать зависшим.
     """
 
-    archive_root: Path = Path(r"D:\archive_test")
+    archive_root: Path
     copy_buffer_size: int = 1024 * 1024
     keep_temp_on_error: bool = False
     reservation_stale_after_seconds: int = 30 * 60

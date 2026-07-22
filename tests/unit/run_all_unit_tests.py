@@ -2,6 +2,7 @@ import subprocess
 import sys
 
 MODULES = [
+    "tests.unit.run_configuration_test",
     "tests.unit.run_naming_test",
     "tests.unit.run_storage_test",
     "tests.unit.run_storage_failure_test",
@@ -9,6 +10,7 @@ MODULES = [
     "tests.unit.run_idempotency_path_safety_test",
     "tests.unit.run_publish_recovery_test",
     "tests.unit.run_operation_id_correlation_test",
+    "tests.unit.run_scan_start_time_test",
     "tests.unit.run_acceptance_runner_test",
     "tests.unit.run_critical_safety_test",
     "tests.unit.run_archive_hardening_test",

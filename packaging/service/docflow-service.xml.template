@@ -1,0 +1,19 @@
+<service>
+  <id>AerotechDocflow</id>
+  <name>Aerotech Docflow</name>
+  <description>Local document scanner and safe archive publishing service.</description>
+  __SERVICE_ACCOUNT__
+  <executable>__DOCFLOW_EXE__</executable>
+  <arguments>--config &quot;__CONFIG_PATH__&quot; run</arguments>
+  <workingdirectory>__APP_DIR__</workingdirectory>
+  <stoptimeout>30 sec</stoptimeout>
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <onfailure action="restart" delay="60 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <logpath>__SERVICE_LOG_DIR__</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+</service>

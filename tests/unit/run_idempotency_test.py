@@ -1,4 +1,6 @@
-from datetime import datetime
+from dataclasses import replace
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 
@@ -6,8 +8,11 @@ from app.idempotency import (
     IdempotencyConflictError,
     IdempotencySettings,
     begin_idempotent_operation,
+    build_request_fingerprint,
     mark_scanned,
     mark_succeeded,
+    read_record,
+    write_record,
 )
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -20,9 +25,7 @@ with tempfile.TemporaryDirectory() as tmp:
         operation_id="OP1",
         task_id="TASK1",
         doc_type="УПД",
-        document_datetime=datetime(2026, 7, 10, 10, 10, 25),
         document_number="2455B",
-        expected_file_name="УПД_260710_101025_2455B.pdf",
         settings=settings,
     )
     assert decision1.mode == "run_new_scan"
@@ -39,17 +42,44 @@ with tempfile.TemporaryDirectory() as tmp:
     record = mark_succeeded(decision1.record_path, record, final_file_name=final_pdf.name, final_file_path=final_pdf)
     assert record is not None
 
+    # Simulate a record written by the previous release, whose fingerprint
+    # included Planfix document_datetime. It must remain replayable after the
+    # HTTP field is removed.
+    legacy_payload = json.dumps(
+        {
+            "task_id": "TASK1",
+            "doc_type": "УПД",
+            "document_datetime": "2026-07-10T10:10:25",
+            "document_number": "2455B",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    legacy_fingerprint = hashlib.sha256(legacy_payload.encode("utf-8")).hexdigest()
+    record = replace(
+        record,
+        document_datetime="2026-07-10T10:10:25",
+        request_fingerprint=legacy_fingerprint,
+    )
+    write_record(decision1.record_path, record)
+
     decision2 = begin_idempotent_operation(
         idempotency_key=key,
         operation_id="OP2",
         task_id="TASK1",
         doc_type="УПД",
-        document_datetime=datetime(2026, 7, 10, 10, 10, 25),
         document_number="2455B",
-        expected_file_name="УПД_260710_101025_2455B.pdf",
         settings=settings,
     )
     assert decision2.mode == "return_existing"
+    migrated = read_record(decision1.record_path)
+    assert migrated is not None
+    assert migrated.request_fingerprint == build_request_fingerprint(
+        task_id="TASK1",
+        doc_type="УПД",
+        document_number="2455B",
+    )
 
     try:
         begin_idempotent_operation(
@@ -57,9 +87,7 @@ with tempfile.TemporaryDirectory() as tmp:
             operation_id="OP3",
             task_id="TASK1",
             doc_type="УПД",
-            document_datetime=datetime(2026, 7, 10, 10, 10, 25),
             document_number="DIFFERENT",
-            expected_file_name="УПД_260710_101025_DIFFERENT.pdf",
             settings=settings,
         )
         raise AssertionError("Expected IdempotencyConflictError")

@@ -40,7 +40,7 @@ assert captured["url"] == "http://127.0.0.1:8000/scan"
 
 with TemporaryDirectory() as temp_dir:
     run_dir = Path(temp_dir)
-    acceptance.create_scenario12_script(run_dir)
+    acceptance.create_scenario12_script(run_dir, "http://127.0.0.1:8000/health")
     script = (run_dir / "scenario_12" / "run_20_documents.ps1").read_bytes()
     script.decode("ascii")
     text = script.decode("ascii")

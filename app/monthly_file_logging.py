@@ -152,7 +152,10 @@ def get_default_log_dir(incoming_dir: Path | str | None = None) -> Path:
     if incoming_dir is not None:
         return Path(incoming_dir) / "_logs"
 
-    return Path(r"D:\incoming") / "_logs"
+    raise ValueError(
+        "DOCFLOW_LOG_DIR is empty and no incoming directory was supplied; "
+        "set logging.directory in config.toml"
+    )
 
 
 
@@ -259,7 +262,7 @@ def configure_monthly_file_logging_from_env(incoming_dir: Path | str | None = No
 
     Переменные окружения:
         DOCFLOW_MONTHLY_FILE_LOGS=0     отключить
-        DOCFLOW_LOG_DIR=D:\\incoming\\_logs
+        DOCFLOW_LOG_DIR=<configured-log-directory>
         DOCFLOW_LOG_LEVEL=INFO
     """
 

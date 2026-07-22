@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import hashlib
 import logging
 import secrets
@@ -15,13 +16,20 @@ from app.idempotency import (
     begin_idempotent_operation,
     load_idempotency_settings_from_env,
     mark_failed,
+    mark_scan_started,
     mark_scanned,
     mark_storing,
     mark_succeeded,
 )
-from app.locks import ScannerLockError, ScannerLockSettings, scanner_lock
+from app.locks import (
+    ScannerLockError,
+    ScannerLockSettings,
+    load_lock_settings_from_env,
+    scanner_lock,
+)
 from app.monthly_file_logging import configure_monthly_file_logging_from_env
 from app.naming import NamingError, build_document_filename
+from app.production_config import validate_document_business_rules
 from app.scanner import (
     ScannerError,
     ScannerSettings,
@@ -40,6 +48,13 @@ from app.storage import (
 
 
 logger = logging.getLogger(__name__)
+MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
+
+
+def current_moscow_time() -> datetime:
+    """Return the authoritative server timestamp used for a new scan name."""
+
+    return datetime.now(MOSCOW_TIMEZONE)
 
 
 def _files_have_same_sha256(first: Path, second: Path) -> bool:
@@ -142,16 +157,18 @@ def get_lock_path(
 
 def prevalidate_before_lock(
     doc_type: str,
-    document_datetime: datetime | str,
     document_number: str,
-) -> str:
+) -> None:
     """
     Проверяем входные данные до захвата lock.
     """
 
-    return build_document_filename(
+    # The real timestamp is not known until NAPS2 is about to start. A fixed
+    # placeholder lets us reject unsafe/overlong naming inputs before taking
+    # the scanner lock without influencing the final filename.
+    build_document_filename(
         doc_type=doc_type,
-        document_datetime=document_datetime,
+        document_datetime=datetime(2000, 1, 1),
         document_number=document_number,
     )
 
@@ -285,7 +302,6 @@ def _storage_retry_from_idempotency_record(
     record: IdempotencyRecord,
     record_path: Path,
     doc_type: str,
-    document_datetime: datetime | str,
     document_number: str,
     scanner_settings: ScannerSettings,
     storage_settings: StorageSettings,
@@ -417,10 +433,19 @@ def _storage_retry_from_idempotency_record(
         ) or current_record
 
     try:
+        if not record.document_datetime:
+            raise IdempotencyError(
+                code="idempotency_scan_start_missing",
+                operator_message="В записи восстановления отсутствует время начала сканирования.",
+                technical_message="Idempotency record has empty server-side scan start timestamp",
+                idempotency_key=record.idempotency_key,
+                record_path=record_path,
+                record=record.to_dict(),
+            )
         stored_document = store_document(
             source_path=source_path,
             doc_type=doc_type,
-            document_datetime=document_datetime,
+            document_datetime=record.document_datetime,
             document_number=document_number,
             settings=storage_settings,
             operation_id=operation_id,
@@ -469,7 +494,6 @@ def _storage_retry_from_idempotency_record(
 def process_document_scan(
     task_id: int | str,
     doc_type: str,
-    document_datetime: datetime | str,
     document_number: str,
     *,
     scanner_settings: ScannerSettings | None = None,
@@ -484,7 +508,7 @@ def process_document_scan(
     Полный процесс:
 
     1. Включаем месячные txt-логи.
-    2. Проверяем входные данные для имени.
+    2. Проверяем входные данные для имени без времени.
     3. Проверяем idempotency_key, если он передан.
     4. Захватываем file lock сканера.
     5. Сканируем документ во временный PDF.
@@ -507,9 +531,8 @@ def process_document_scan(
 
     configure_monthly_file_logging_from_env(effective_scanner_settings.incoming_dir)
 
-    expected_file_name = prevalidate_before_lock(
+    prevalidate_before_lock(
         doc_type=doc_type,
-        document_datetime=document_datetime,
         document_number=document_number,
     )
 
@@ -519,10 +542,9 @@ def process_document_scan(
     )
 
     logger.info(
-        "Document scan process started: operation_id=%s task_id=%s expected_file_name=%s lock_path=%s idempotency_key=%s",
+        "Document scan process started: operation_id=%s task_id=%s lock_path=%s idempotency_key=%s",
         operation_id,
         task_id_str,
-        expected_file_name,
         lock_path,
         idempotency_key,
     )
@@ -532,9 +554,7 @@ def process_document_scan(
         operation_id=operation_id,
         task_id=task_id_str,
         doc_type=doc_type,
-        document_datetime=document_datetime,
         document_number=document_number,
-        expected_file_name=expected_file_name,
         settings=effective_idempotency_settings,
         incoming_dir=effective_scanner_settings.incoming_dir,
         archive_root=effective_storage_settings.archive_root,
@@ -585,14 +605,13 @@ def process_document_scan(
             record=idempotency_record,
             record_path=idempotency_record_path,
             doc_type=doc_type,
-            document_datetime=document_datetime,
             document_number=document_number,
             scanner_settings=effective_scanner_settings,
             storage_settings=effective_storage_settings,
         )
 
     if lock_settings is None:
-        lock_settings = ScannerLockSettings()
+        lock_settings = load_lock_settings_from_env()
 
     if use_lock:
         lock_context = scanner_lock(
@@ -606,14 +625,47 @@ def process_document_scan(
 
     temp_scan_path: Path | None = None
     current_record = idempotency_record
+    scan_started_at: datetime | None = None
+    expected_file_name: str | None = None
 
     try:
         with lock_context:
+            def record_physical_scan_start() -> None:
+                nonlocal scan_started_at, expected_file_name, current_record
+                scan_started_at = current_moscow_time()
+                validate_document_business_rules(
+                    doc_type=doc_type,
+                    document_datetime=scan_started_at,
+                )
+                expected_file_name = build_document_filename(
+                    doc_type=doc_type,
+                    document_datetime=scan_started_at,
+                    document_number=document_number,
+                )
+                current_record = mark_scan_started(
+                    idempotency_record_path,
+                    current_record,
+                    scan_started_at=scan_started_at,
+                    expected_file_name=expected_file_name,
+                ) or current_record
+                logger.info(
+                    "Physical scan starting operation_id=%s task_id=%s scan_started_at=%s timezone=%s expected_file_name=%s",
+                    operation_id,
+                    task_id_str,
+                    scan_started_at.isoformat(timespec="seconds"),
+                    MOSCOW_TIMEZONE.key,
+                    expected_file_name,
+                )
+
             temp_scan_path = scan_document(
                 task_id=task_id_str,
                 settings=effective_scanner_settings,
                 operation_id=operation_id,
+                on_scan_start=record_physical_scan_start,
             )
+
+            if scan_started_at is None or expected_file_name is None:
+                raise RuntimeError("Scanner returned without recording its start timestamp")
 
             current_record = mark_scanned(
                 idempotency_record_path,
@@ -638,7 +690,7 @@ def process_document_scan(
             stored_document: StoredDocument = store_document(
                 source_path=temp_scan_path,
                 doc_type=doc_type,
-                document_datetime=document_datetime,
+                document_datetime=scan_started_at,
                 document_number=document_number,
                 settings=effective_storage_settings,
                 operation_id=operation_id,
@@ -756,7 +808,7 @@ def retry_store_existing_scan(
     task_id: int | str,
     source_path: Path | str,
     doc_type: str,
-    document_datetime: datetime | str,
+    scan_started_at: datetime | str,
     document_number: str,
     *,
     storage_settings: StorageSettings | None = None,
@@ -788,7 +840,7 @@ def retry_store_existing_scan(
     stored_document = store_document(
         source_path=source_path,
         doc_type=doc_type,
-        document_datetime=document_datetime,
+        document_datetime=scan_started_at,
         document_number=document_number,
         settings=effective_storage_settings,
         operation_id=operation_id,
@@ -816,7 +868,6 @@ def retry_store_existing_scan(
 def process_document_scan_safe(
     task_id: int | str,
     doc_type: str,
-    document_datetime: datetime | str,
     document_number: str,
     *,
     scanner_settings: ScannerSettings | None = None,
@@ -840,7 +891,6 @@ def process_document_scan_safe(
         result = process_document_scan(
             task_id=task_id,
             doc_type=doc_type,
-            document_datetime=document_datetime,
             document_number=document_number,
             scanner_settings=scanner_settings,
             storage_settings=storage_settings,

@@ -98,8 +98,7 @@ class IdempotencySettings:
     Файловая идемпотентность без SQLite.
 
     record_dir:
-        Папка для JSON-маркеров операций. По умолчанию:
-            D:\\incoming\\_idempotency
+        Папка для JSON-маркеров операций. Задаётся в config.toml.
 
     in_progress_stale_after_seconds:
         Через сколько секунд незавершённую processing/storing запись можно
@@ -110,7 +109,7 @@ class IdempotencySettings:
         Если False, idempotency_key игнорируется.
     """
 
-    record_dir: Path = Path(r"D:\incoming\_idempotency")
+    record_dir: Path | None = None
     in_progress_stale_after_seconds: int = 30 * 60
     enabled: bool = True
 
@@ -231,9 +230,17 @@ def parse_datetime_utc(value: str) -> datetime | None:
 
 
 def load_idempotency_settings_from_env(default_incoming_dir: Path | str | None = None) -> IdempotencySettings:
-    default_dir = Path(default_incoming_dir or r"D:\incoming") / "_idempotency"
+    configured_dir = os.getenv("DOCFLOW_IDEMPOTENCY_DIR", "").strip()
+    if configured_dir:
+        record_dir = Path(configured_dir)
+    elif default_incoming_dir is not None:
+        record_dir = Path(default_incoming_dir) / "_idempotency"
+    else:
+        raise ValueError(
+            "DOCFLOW_IDEMPOTENCY_DIR is empty; set idempotency.directory in config.toml"
+        )
     return IdempotencySettings(
-        record_dir=Path(os.getenv("DOCFLOW_IDEMPOTENCY_DIR", str(default_dir))),
+        record_dir=record_dir,
         in_progress_stale_after_seconds=int(
             os.getenv("DOCFLOW_IDEMPOTENCY_STALE_SECONDS", str(30 * 60))
         ),
@@ -254,7 +261,6 @@ def build_business_idempotency_key(
     *,
     task_id: int | str,
     doc_type: str,
-    document_datetime: Any,
     document_number: str,
 ) -> str:
     """
@@ -264,14 +270,13 @@ def build_business_idempotency_key(
     повторные сканы не превращались в replay. Вызывать явно.
     """
 
-    return f"scan:{task_id}:{doc_type}:{document_datetime}:{document_number}"
+    return f"scan:{task_id}:{doc_type}:{document_number}"
 
 
 def build_request_fingerprint(
     *,
     task_id: int | str,
     doc_type: str,
-    document_datetime: Any,
     document_number: str,
 ) -> str:
     """Строит стабильный fingerprint бизнес-параметров операции."""
@@ -288,7 +293,6 @@ def build_request_fingerprint(
     canonical = {
         "task_id": str(task_id).strip(),
         "doc_type": normalized_doc_type,
-        "document_datetime": parse_document_datetime(document_datetime).isoformat(timespec="seconds"),
         "document_number": normalized_document_number,
     }
     if raw_doc_type != normalized_doc_type:
@@ -446,9 +450,7 @@ def _new_processing_record(
     operation_id: str,
     task_id: str,
     doc_type: str,
-    document_datetime: Any,
     document_number: str,
-    expected_file_name: str,
     request_fingerprint: str,
     attempt: int = 1,
 ) -> IdempotencyRecord:
@@ -459,9 +461,11 @@ def _new_processing_record(
         operation_id=operation_id,
         task_id=str(task_id),
         doc_type=str(doc_type),
-        document_datetime=str(document_datetime),
+        # Kept under the historical JSON field name for backward-compatible
+        # recovery. New records fill it with the server-side scan start time.
+        document_datetime="",
         document_number=str(document_number),
-        expected_file_name=str(expected_file_name),
+        expected_file_name="",
         request_fingerprint=request_fingerprint,
         attempt=attempt,
         pid=os.getpid(),
@@ -486,9 +490,7 @@ def begin_idempotent_operation(
     operation_id: str,
     task_id: int | str,
     doc_type: str,
-    document_datetime: Any,
     document_number: str,
-    expected_file_name: str,
     settings: IdempotencySettings,
     incoming_dir: Path | str | None = None,
     archive_root: Path | str | None = None,
@@ -500,12 +502,18 @@ def begin_idempotent_operation(
     normalized_key = normalize_idempotency_key(idempotency_key)
     if not settings.enabled or normalized_key is None:
         return IdempotencyDecision(mode="disabled")
+    if settings.record_dir is None:
+        raise IdempotencyRecordError(
+            code="idempotency_directory_missing",
+            operator_message="Не настроено хранилище состояния операций.",
+            technical_message="IdempotencySettings.record_dir is None",
+            idempotency_key=normalized_key,
+        )
 
     record_path = build_record_path(settings.record_dir, normalized_key)
     request_fingerprint = build_request_fingerprint(
         task_id=task_id,
         doc_type=doc_type,
-        document_datetime=document_datetime,
         document_number=document_number,
     )
 
@@ -514,9 +522,7 @@ def begin_idempotent_operation(
         operation_id=operation_id,
         task_id=str(task_id),
         doc_type=doc_type,
-        document_datetime=document_datetime,
         document_number=document_number,
-        expected_file_name=expected_file_name,
         request_fingerprint=request_fingerprint,
     )
 
@@ -540,33 +546,30 @@ def begin_idempotent_operation(
                 operation_id=operation_id,
                 task_id=task_id,
                 doc_type=doc_type,
-                document_datetime=document_datetime,
                 document_number=document_number,
-                expected_file_name=expected_file_name,
                 settings=settings,
                 incoming_dir=incoming_dir,
                 archive_root=archive_root,
             )
 
-    existing_fingerprint = existing.request_fingerprint
-    if not existing_fingerprint:
-        try:
-            existing_fingerprint = build_request_fingerprint(
-                task_id=existing.task_id,
-                doc_type=existing.doc_type,
-                document_datetime=existing.document_datetime,
-                document_number=existing.document_number,
-            )
-        except Exception as exc:
-            raise IdempotencyRecordError(
-                code="idempotency_record_fingerprint_error",
-                operator_message="Запись идемпотентности содержит некорректные параметры документа.",
-                technical_message=str(exc),
-                idempotency_key=normalized_key,
-                record_path=record_path,
-                record=existing.to_dict(),
-            ) from exc
-        existing = replace(existing, request_fingerprint=existing_fingerprint)
+    # Recalculate from the persisted business identity. Old releases included
+    # Planfix document_datetime in the fingerprint; accepting the recalculated
+    # value keeps their succeeded/recovery records usable after this upgrade.
+    try:
+        existing_fingerprint = build_request_fingerprint(
+            task_id=existing.task_id,
+            doc_type=existing.doc_type,
+            document_number=existing.document_number,
+        )
+    except Exception as exc:
+        raise IdempotencyRecordError(
+            code="idempotency_record_fingerprint_error",
+            operator_message="Запись идемпотентности содержит некорректные параметры документа.",
+            technical_message=str(exc),
+            idempotency_key=normalized_key,
+            record_path=record_path,
+            record=existing.to_dict(),
+        ) from exc
 
     if not secrets.compare_digest(existing_fingerprint, request_fingerprint):
         raise IdempotencyConflictError(
@@ -580,6 +583,10 @@ def begin_idempotent_operation(
             record_path=record_path,
             record=existing.to_dict(),
         )
+
+    if existing.request_fingerprint != existing_fingerprint:
+        existing = replace(existing, request_fingerprint=existing_fingerprint)
+        write_record(record_path, existing)
 
     _ensure_recorded_path_within(
         raw_path=existing.temp_scan_path,
@@ -656,9 +663,7 @@ def begin_idempotent_operation(
             operation_id=operation_id,
             task_id=str(task_id),
             doc_type=doc_type,
-            document_datetime=document_datetime,
             document_number=document_number,
-            expected_file_name=expected_file_name,
             request_fingerprint=request_fingerprint,
             attempt=existing.attempt + 1,
         )
@@ -694,9 +699,7 @@ def begin_idempotent_operation(
             operation_id=operation_id,
             task_id=str(task_id),
             doc_type=doc_type,
-            document_datetime=document_datetime,
             document_number=document_number,
-            expected_file_name=expected_file_name,
             request_fingerprint=request_fingerprint,
             attempt=existing.attempt + 1,
         )
@@ -709,15 +712,39 @@ def begin_idempotent_operation(
         operation_id=operation_id,
         task_id=str(task_id),
         doc_type=doc_type,
-        document_datetime=document_datetime,
         document_number=document_number,
-        expected_file_name=expected_file_name,
         request_fingerprint=request_fingerprint,
         attempt=existing.attempt + 1,
     )
     write_record(record_path, replacement)
     return IdempotencyDecision(mode="run_new_scan", record=replacement, record_path=record_path, reason=f"previous_status_{status}")
 
+
+
+def mark_scan_started(
+    record_path: Path | None,
+    record: IdempotencyRecord | None,
+    *,
+    scan_started_at: datetime | str,
+    expected_file_name: str,
+) -> IdempotencyRecord | None:
+    if record_path is None or record is None:
+        return None
+    timestamp = parse_document_datetime(scan_started_at).isoformat(timespec="seconds")
+    updated = _with_updates(
+        record,
+        document_datetime=timestamp,
+        expected_file_name=expected_file_name,
+    )
+    write_record(record_path, updated)
+    logger.info(
+        "Idempotency scan start recorded idempotency_key=%s operation_id=%s scan_started_at=%s expected_file_name=%s",
+        updated.idempotency_key,
+        updated.operation_id,
+        timestamp,
+        expected_file_name,
+    )
+    return updated
 
 
 def mark_scanned(record_path: Path | None, record: IdempotencyRecord | None, *, temp_scan_path: Path | str) -> IdempotencyRecord | None:

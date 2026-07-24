@@ -122,12 +122,13 @@ def get_effective_scanner_settings(
 ) -> ScannerSettings:
     settings = scanner_settings if scanner_settings is not None else load_settings_from_env()
 
-    if scanner_profile is None:
+    profile_to_use = scanner_profile if scanner_profile is not None else settings.profile_name
+    if profile_to_use is None:
         return settings
 
     return replace(
         settings,
-        profile_name=validate_scanner_profile_name(scanner_profile),
+        profile_name=validate_scanner_profile_name(profile_to_use),
     )
 
 

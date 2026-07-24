@@ -40,7 +40,7 @@ Reservation публикуется только после полной запи
 Если передан `idempotency_key`, создаётся JSON-маркер в:
 
 ```text
-D:\incoming\_idempotency
+C:\AerotechDocflow-Example\idempotency
 ```
 
 Поведение:

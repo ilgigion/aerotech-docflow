@@ -245,6 +245,9 @@ stable_interval_seconds = 0.2
     build_script = (project_root / "packaging" / "build_windows.ps1").read_text(
         encoding="utf-8"
     )
+    production_template = (
+        project_root / "packaging" / "config.production.example.toml"
+    ).read_text(encoding="utf-8")
     common_paths = (project_root / "packaging" / "common_paths.ps1").read_text(
         encoding="utf-8"
     )
@@ -259,9 +262,14 @@ stable_interval_seconds = 0.2
     ]
     assert '"D:\\Archive"' not in installer
     assert '"D:\\incoming"' not in installer
-    assert "aerotech-primary-archive" not in installer
+    assert "REPLACE_WITH_UNIQUE_ARCHIVE_ID" not in installer
     assert "effective_environment" in installer
     assert "show-config --ascii" in installer
+    assert "packaging\\config.production.example.toml" in build_script
+    assert "packaging\\config.production.toml" not in build_script
+    assert "REPLACE_WITH_NAPS2_PROFILE_NAME" in production_template
+    assert "REPLACE_WITH_ARCHIVE_ROOT" in production_template
+    assert "REPLACE_WITH_UNIQUE_ARCHIVE_ID" in production_template
     assert "Remove-Item -LiteralPath $Marker" not in cleanup
     assert "Invoke-WebRequest" in updater
     assert "AerotechDocflow-update-" in updater

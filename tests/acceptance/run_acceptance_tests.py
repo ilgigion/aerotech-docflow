@@ -451,7 +451,7 @@ def create_manual_plan(run_dir: Path) -> None:
         "Пример запроса:",
         "",
         "```powershell",
-        f'python -m tests.acceptance.run_acceptance_tests request --run "{run_dir}" --scenario 1 --task-id "ACC-001" --doc-type "НКЛ" --document-number "001" --scanner-profile "EPSON DS-790WN" --confirm-real-scan',
+        f'python -m tests.acceptance.run_acceptance_tests request --run "{run_dir}" --scenario 1 --task-id "ACC-001" --doc-type "НКЛ" --document-number "001" --scanner-profile "MY_NAPS2_PROFILE" --confirm-real-scan',
         "```",
         "",
         "Пример фиксации результата:",

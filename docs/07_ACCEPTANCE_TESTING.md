@@ -64,12 +64,12 @@ cd acceptance_runs\<RUN_ID>
 
 ```powershell
 python -m tests.acceptance.run_acceptance_tests request `
-  --run "D:\PROG_PROJECTS\aerotech-docflow\acceptance_runs\<RUN_ID>" `
+  --run "C:\path\to\aerotech-docflow\acceptance_runs\<RUN_ID>" `
   --scenario 1 `
   --task-id "ACC-001" `
   --doc-type "НКЛ" `
   --document-number "001" `
-  --scanner-profile "EPSON DS-790WN" `
+  --scanner-profile "MY_NAPS2_PROFILE" `
   --confirm-real-scan
 ```
 
@@ -80,7 +80,7 @@ Runner сохраняет тело запроса, ответ, HTTP status и с
 Для сценария 12 передайте профиль параметром скрипта:
 
 ```powershell
-& "$run\scenario_12\run_20_documents.ps1" -ScannerProfile "EPSON DS-790WN"
+& "$run\scenario_12\run_20_documents.ps1" -ScannerProfile "MY_NAPS2_PROFILE"
 ```
 
 Для localhost runner использует HTTP-клиент с `trust_env=False`: переменные
@@ -96,7 +96,7 @@ Runner сохраняет тело запроса, ответ, HTTP status и с
 
 ```powershell
 python -m tests.acceptance.run_acceptance_tests record `
-  --run "D:\PROG_PROJECTS\aerotech-docflow\acceptance_runs\<RUN_ID>" `
+  --run "C:\path\to\aerotech-docflow\acceptance_runs\<RUN_ID>" `
   --scenario 1 `
   --status PASSED `
   --notes "Создан один PDF, имя и каталог проверены" `
@@ -134,7 +134,7 @@ python -m tests.acceptance.check_scenario12 --run "D:\...\acceptance_runs\<RUN_I
 
 ```powershell
 python -m tests.acceptance.run_acceptance_tests finalize `
-  --run "D:\PROG_PROJECTS\aerotech-docflow\acceptance_runs\<RUN_ID>"
+  --run "C:\path\to\aerotech-docflow\acceptance_runs\<RUN_ID>"
 ```
 
 Runner повторно вычислит SHA-256 защищённых файлов и обновит таблицу. Допуск

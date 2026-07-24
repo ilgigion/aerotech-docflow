@@ -21,6 +21,8 @@ C:\Program Files\Aerotech Docflow\
     uninstall-service.ps1
   config\
     config.example.toml
+    config.production.toml
+    config.production.example.toml
   docs\
     INSTALLATION.md
 
@@ -37,7 +39,7 @@ D:\Docflow\incoming\
   .scanner.lock
   _failed_runtime\
 
-D:\Archive\
+D:\REPLACE_WITH_ARCHIVE_ROOT\
   .aerotech-docflow-archive.json
   2026\НКЛ\...
 ```
@@ -145,7 +147,7 @@ New-Item -ItemType Directory -Path "C:\ProgramData\Aerotech Docflow\config" -For
 администратора. В корне архива должен находиться файл:
 
 ```text
-D:\Archive\.aerotech-docflow-archive.json
+D:\REPLACE_WITH_ARCHIVE_ROOT\.aerotech-docflow-archive.json
 ```
 
 Содержимое:
@@ -153,7 +155,7 @@ D:\Archive\.aerotech-docflow-archive.json
 ```json
 {
   "marker": "aerotech-docflow-archive-v1",
-  "archive_id": "aerotech-primary-archive"
+  "archive_id": "REPLACE_WITH_UNIQUE_ARCHIVE_ID"
 }
 ```
 
@@ -181,7 +183,7 @@ D:\Archive\.aerotech-docflow-archive.json
 %APPDATA%\NAPS2\profiles.xml
 ```
 
-Если профиль `EPSON DS-790WN` создан под оператором, служба под LocalSystem,
+Если профиль `MY_NAPS2_PROFILE` создан под оператором, служба под LocalSystem,
 LocalService или другим пользователем может его не увидеть.
 
 Безопасные варианты:

@@ -88,7 +88,7 @@ incoming source
 
 ## Lock сканера
 
-`D:\incoming\.scanner.lock` содержит:
+`<INCOMING_DIR>\.scanner.lock` содержит:
 
 - `operation_id`;
 - `task_id`;

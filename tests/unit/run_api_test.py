@@ -52,7 +52,7 @@ try:
             "task_id": "53243",
             "doc_type": "НКЛ",
             "document_number": "001",
-            "scanner_profile": "EPSON DS-790WN",
+            "scanner_profile": "UNIT_TEST_PROFILE",
         },
     )
 finally:
@@ -71,7 +71,7 @@ assert captured_arguments["idempotency_key"] == (
     "planfix_53243_НКЛ_001"
 )
 assert "document_datetime" not in captured_arguments
-assert captured_arguments["scanner_profile"] == "EPSON DS-790WN"
+assert captured_arguments["scanner_profile"] == "UNIT_TEST_PROFILE"
 assert "file_path" not in success_response.json()
 
 
@@ -94,7 +94,7 @@ try:
             "task_id": "53243",
             "doc_type": "НКЛ",
             "document_number": "001",
-            "scanner_profile": "EPSON DS-790WN",
+            "scanner_profile": "UNIT_TEST_PROFILE",
             "idempotency_key": "request-53243",
         },
     )
@@ -125,7 +125,7 @@ invalid_identity_response = client.post(
         "task_id": "53243",
         "doc_type": "<>",
         "document_number": "001",
-        "scanner_profile": "EPSON DS-790WN",
+        "scanner_profile": "UNIT_TEST_PROFILE",
         "idempotency_key": "explicit-key",
     },
 )
@@ -139,7 +139,7 @@ legacy_datetime_response = client.post(
         "doc_type": "НКЛ",
         "document_datetime": "2026-06-24T13:50:00",
         "document_number": "001",
-        "scanner_profile": "EPSON DS-790WN",
+        "scanner_profile": "UNIT_TEST_PROFILE",
     },
 )
 assert legacy_datetime_response.status_code == 422, legacy_datetime_response.text

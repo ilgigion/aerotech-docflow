@@ -33,7 +33,7 @@ Invoke-RestMethod `
     "task_id": "53243",
     "doc_type": "НКЛ",
     "document_number": "001",
-    "scanner_profile": "EPSON DS-790WN",
+    "scanner_profile": "MY_NAPS2_PROFILE",
     "idempotency_key": "planfix_53243_НКЛ_001"
   }'
 ```

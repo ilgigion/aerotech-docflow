@@ -57,7 +57,11 @@ foreach ($Directory in @($PackageApp, $PackageConfig, $PackageService, $PackageD
 
 Copy-Item -Path (Join-Path $BuiltApp "*") -Destination $PackageApp -Recurse -Force
 Copy-Item -LiteralPath "config.example.toml" -Destination (Join-Path $PackageConfig "config.example.toml") -Force
-Copy-Item -LiteralPath "packaging\config.production.toml" -Destination (Join-Path $PackageConfig "config.production.toml") -Force
+$ProductionTemplate = "packaging\config.production.example.toml"
+# The editable package copy keeps the historical config.production.toml name,
+# while the second copy remains an untouched reference for recovery/comparison.
+Copy-Item -LiteralPath $ProductionTemplate -Destination (Join-Path $PackageConfig "config.production.toml") -Force
+Copy-Item -LiteralPath $ProductionTemplate -Destination (Join-Path $PackageConfig "config.production.example.toml") -Force
 Copy-Item -LiteralPath "packaging\service\docflow-service.xml.template" -Destination $PackageService -Force
 Copy-Item -LiteralPath "packaging\service\install-service.ps1" -Destination $PackageService -Force
 Copy-Item -LiteralPath "packaging\service\uninstall-service.ps1" -Destination $PackageService -Force

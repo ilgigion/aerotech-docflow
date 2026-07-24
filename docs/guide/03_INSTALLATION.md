@@ -30,13 +30,13 @@ WinSW нужен только для необязательного запуск
 Готовый пакет находится в:
 
 ```text
-D:\PROG_PROJECTS\aerotech-docflow\dist\AerotechDocflow
+C:\path\to\aerotech-docflow\dist\AerotechDocflow
 ```
 
 Откройте PowerShell через **Запуск от имени администратора**:
 
 ```powershell
-cd "D:\PROG_PROJECTS\aerotech-docflow\dist\AerotechDocflow"
+cd "C:\path\to\aerotech-docflow\dist\AerotechDocflow"
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 

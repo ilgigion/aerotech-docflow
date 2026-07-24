@@ -7,18 +7,18 @@
 ## Текущий стабильный контур
 
 ```text
-NAPS2 / EPSON DS-790WN
+NAPS2 / выбранный профиль сканера
   → app.scanner
-  → D:\incoming\PF_*.pdf
+  → C:\AerotechDocflow-Example\incoming\PF_*.pdf
   → app.document_flow
   → app.storage
-  → D:\archive_test\ГОД\ТИП\ТИП_ГГММДД_ЧЧММСС_НОМЕР.pdf
+  → C:\AerotechDocflow-Example\archive\ГОД\ТИП\ТИП_ГГММДД_ЧЧММСС_НОМЕР.pdf
 ```
 
 ## Что реализовано
 
 - запуск NAPS2 через профиль или прямой eSCL;
-- file lock сканера `D:\incoming\.scanner.lock`;
+- file lock сканера `C:\AerotechDocflow-Example\incoming\.scanner.lock`;
 - защита от `Ctrl+C`, timeout и зависшего NAPS2;
 - аварийный карантин частичных runtime-файлов;
 - атомарный перенос через `.tmp`;
@@ -44,7 +44,7 @@ NAPS2 / EPSON DS-790WN
 ## Установка
 
 ```powershell
-cd D:\PROG_PROJECTS\aerotech-docflow
+cd C:\path\to\aerotech-docflow
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -77,6 +77,19 @@ python -m app.cli --config .\config.toml run
 `.scanner.lock` намеренно сохраняется до ручной диагностики.
 
 ## Основные команды
+
+## Приватные конфигурации
+
+В Git хранятся только обезличенные шаблоны:
+
+- `.env.example` — пример переменных окружения для development;
+- `config.example.toml` — development-пример TOML;
+- `packaging/config.production.example.toml` — production-шаблон для сборки.
+
+Рабочие `.env`, `config.toml`, `config.production.toml`, их резервные копии,
+ключи, сертификаты, логи, PDF, idempotency/runtime-данные и service XML
+игнорируются. Скопируйте подходящий `.example`-файл, заполните локальную копию и
+никогда не добавляйте её в Git.
 
 ### Локальный API
 
@@ -115,7 +128,7 @@ Invoke-RestMethod `
     "task_id": "53243",
     "doc_type": "НКЛ",
     "document_number": "001",
-    "scanner_profile": "EPSON DS-790WN",
+    "scanner_profile": "MY_NAPS2_PROFILE",
     "idempotency_key": "planfix_53243_НКЛ_001"
   }'
 ```

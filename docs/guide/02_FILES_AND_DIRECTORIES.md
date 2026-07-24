@@ -5,7 +5,7 @@
 ### Исходный проект
 
 ```text
-D:\PROG_PROJECTS\aerotech-docflow\
+C:\path\to\aerotech-docflow\
 ```
 
 Здесь находятся Python-код, тесты, документация и сценарий сборки. Из этого
@@ -15,7 +15,7 @@ D:\PROG_PROJECTS\aerotech-docflow\
 ### Установочный пакет
 
 ```text
-D:\PROG_PROJECTS\aerotech-docflow\dist\AerotechDocflow\
+C:\path\to\aerotech-docflow\dist\AerotechDocflow\
 ```
 
 Это переносимый результат PyInstaller. Он содержит EXE, внутренние библиотеки,
@@ -41,6 +41,7 @@ C:\Program Files\Aerotech Docflow\
   config\
     config.example.toml
     config.production.toml
+    config.production.example.toml
   service\
     docflow-service.exe
     docflow-service.xml.template
@@ -62,12 +63,12 @@ C:\ProgramData\Aerotech Docflow\
   data\
     idempotency\
 
-D:\incoming\
+C:\ProgramData\Aerotech Docflow\incoming\
   .scanner.lock
   PF_*.pdf
   _failed_runtime\
 
-D:\Archive\
+D:\REPLACE_WITH_ARCHIVE_ROOT\
   .aerotech-docflow-archive.json
   2026\
     НКЛ\
@@ -80,6 +81,7 @@ D:\Archive\
 |---|---|---|
 | `config.toml` | Рабочая конфигурация компьютера | Только с резервной копией и при остановленной программе |
 | `config.example.toml` | Учебный development-пример | Да, но он нужен для справки и сборки |
+| `config.production.example.toml` | Неизменённый обезличенный production-шаблон | Да, но он нужен для сравнения и восстановления настроек |
 | `.aerotech-docflow-archive.json` | Подтверждает identity выбранного архива | Нет во время эксплуатации |
 | `.scanner.lock` | Запрещает параллельный физический скан | Только после диагностики владельца |
 | `PF_*.pdf` | Временный валидный скан или аварийно сохранённый исходник | Нет, пока не проверена идемпотентность |

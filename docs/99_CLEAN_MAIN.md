@@ -5,7 +5,7 @@
 ## 1. Сделать резервную ветку текущего состояния
 
 ```powershell
-cd D:\PROG_PROJECTS\aerotech-docflow
+cd C:\path\to\aerotech-docflow
 
 git status
 

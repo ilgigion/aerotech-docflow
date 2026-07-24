@@ -1,10 +1,13 @@
-# Safe development example. Copy to config.toml and edit the copy.
-# Never put real passwords, tokens, private network addresses or archive
-# identifiers in a tracked *.example.toml file.
+# Safe production template distributed with the application.
+#
+# Before installation, copy/edit the packaged config.production.toml and
+# replace every REPLACE_WITH_* value for the target computer. Do not commit the
+# resulting machine configuration. Production preflight must pass before the
+# service is installed or started.
 
 [application]
-environment = "development"
-version = "dev"
+environment = "production"
+version = "REPLACE_WITH_RELEASE_VERSION"
 host = "127.0.0.1"
 port = 8000
 
@@ -12,7 +15,7 @@ port = 8000
 naps2_executable = "C:\\Program Files\\NAPS2\\NAPS2.Console.exe"
 profile = "REPLACE_WITH_NAPS2_PROFILE_NAME"
 output_encoding = "cp866"
-incoming_dir = "C:\\AerotechDocflow-Example\\incoming"
+incoming_dir = "C:\\ProgramData\\Aerotech Docflow\\incoming"
 timeout_seconds = 180
 timeout_kill_grace_seconds = 10
 verify_process_exit_seconds = 5
@@ -23,7 +26,7 @@ min_pdf_pages = 1
 stable_checks = 2
 stable_interval_seconds = 0.5
 
-# Used only when scanner.profile is empty.
+# Used only by internal/manual direct mode when scanner.profile is empty.
 [scanner.direct]
 driver = "escl"
 device_name = "REPLACE_WITH_SCANNER_DEVICE_NAME"
@@ -33,12 +36,16 @@ page_size = "a4"
 bit_depth = "gray"
 
 [archive]
-root = "C:\\AerotechDocflow-Example\\archive"
-confirmation = ""
-archive_id = ""
+# Use the real absolute archive root on the target computer. Keep incoming,
+# logs and idempotency outside this directory.
+root = "D:\\REPLACE_WITH_ARCHIVE_ROOT"
+# Must be exactly the same absolute path as archive.root in production.
+confirmation = "D:\\REPLACE_WITH_ARCHIVE_ROOT"
+# Must match the archive marker created during the controlled installation.
+archive_id = "REPLACE_WITH_UNIQUE_ARCHIVE_ID"
 allowed_doc_types = ["TYPE_A", "TYPE_B"]
 min_document_year = 2020
-max_document_year = 2030
+max_document_year = 2035
 
 [storage]
 copy_buffer_size = 1048576

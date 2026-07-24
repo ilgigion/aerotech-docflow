@@ -10,8 +10,8 @@
 ```powershell
 $exe = "C:\Program Files\Aerotech Docflow\app\aerotech-docflow.exe"
 $config = "C:\ProgramData\Aerotech Docflow\config\config.toml"
-$incoming = "D:\incoming"
-$archive = "D:\Archive"
+$incoming = "C:\ProgramData\Aerotech Docflow\incoming"
+$archive = "D:\REPLACE_WITH_ARCHIVE_ROOT"
 $logs = "C:\ProgramData\Aerotech Docflow\logs"
 ```
 
@@ -125,7 +125,7 @@ GUI, закройте его. Если есть lock без процессов, 
 Из исходного проекта безопасный recovery:
 
 ```powershell
-cd "D:\PROG_PROJECTS\aerotech-docflow"
+cd "C:\path\to\aerotech-docflow"
 python -m tests.manual.run_scanner_recovery_diagnostics
 python -m tests.manual.run_scanner_recovery_diagnostics `
   --kill-naps2 `
@@ -181,7 +181,7 @@ Remove-Item "$incoming\.scanner.lock"
 Коды `output_pdf_parse_error`, `output_pdf_missing_eof`,
 `output_pdf_has_no_pages`, `atomic_temp_pdf_invalid` означают, что документ не
 принят. Недоверенный scanner output может находиться в
-`D:\incoming\_failed_runtime`.
+`<INCOMING_DIR>\_failed_runtime`.
 
 Не переносите файл из карантина в архив вручную без открытия, строгой проверки
 и отдельного решения ответственного за архив.

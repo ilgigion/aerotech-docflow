@@ -37,5 +37,5 @@ python -m tests.manual.run_scan_epson_escl_duplex
 Месячные TXT-логи пишутся в:
 
 ```text
-D:\incoming\_logs\docflow_YYYY_MM.txt
+C:\AerotechDocflow-Example\logs\docflow_YYYY_MM.txt
 ```

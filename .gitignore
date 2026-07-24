@@ -14,7 +14,51 @@ ENV/
 .env
 .env.*
 !.env.example
-config.toml
+.envrc
+**/config.toml
+**/config.local.toml
+**/config.production.toml
+**/config.*.local.toml
+**/config.*.toml
+**/config.local.json
+**/config.production.json
+**/config.local.yaml
+**/config.production.yaml
+**/config.local.yml
+**/config.production.yml
+config.production copy.toml
+config.toml.*
+*.secrets.toml
+*.secrets.json
+*.credentials.json
+*.token
+secrets/
+credentials/
+tokens/
+!config.example.toml
+!packaging/config.production.example.toml
+
+# Credentials, private keys and machine certificates
+*.pem
+*.key
+*.pfx
+*.p12
+*.ppk
+*.crt
+*.cer
+*.ovpn
+*.rdp
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# Machine-specific service/NAPS2 files
+**/docflow-service.xml
+!**/docflow-service.xml.template
+profiles.xml
 
 # Local runtime data
 data/
@@ -27,6 +71,20 @@ _failed_runtime/
 *.lock
 *.tmp
 *.reserve
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.pdf
+.aerotech-docflow-archive.json
+
+# Local copies and editor backups can contain configuration or credentials
+*.bak
+*.backup
+*.orig
+*.before-*
+*~
 
 # Tests/cache
 .pytest_cache/
@@ -47,3 +105,4 @@ dist/
 /docs.zip
 deployment_ready/
 *.egg-info/
+*.zip

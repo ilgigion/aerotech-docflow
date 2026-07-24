@@ -4,10 +4,10 @@
 `config\config.production.toml`. Например:
 
 ```text
-архив      D:\Archive
-incoming   D:\incoming
+архив      D:\REPLACE_WITH_ARCHIVE_ROOT
+incoming   C:\ProgramData\Aerotech Docflow\incoming
 NAPS2      C:\Program Files\NAPS2\NAPS2.Console.exe
-профиль    EPSON DS-790WN
+профиль    MY_NAPS2_PROFILE
 API        http://127.0.0.1:8000
 ```
 
@@ -21,7 +21,7 @@ API        http://127.0.0.1:8000
 Пакет находится здесь:
 
 ```text
-D:\PROG_PROJECTS\aerotech-docflow\dist\AerotechDocflow
+C:\path\to\aerotech-docflow\dist\AerotechDocflow
 ```
 
 Не копируйте отдельные файлы из старых каталогов. Все команды ниже выполняются
@@ -32,7 +32,7 @@ D:\PROG_PROJECTS\aerotech-docflow\dist\AerotechDocflow
 Откройте **Windows PowerShell от имени администратора** и выполните:
 
 ```powershell
-cd "D:\PROG_PROJECTS\aerotech-docflow\dist\AerotechDocflow"
+cd "C:\path\to\aerotech-docflow\dist\AerotechDocflow"
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\cleanup_previous_install.ps1
 ```
@@ -143,7 +143,7 @@ $body = @{
     task_id = "INSTALL-TEST-001"
     doc_type = "НКЛ"
     document_number = "INSTALL-001"
-    scanner_profile = "EPSON DS-790WN"
+    scanner_profile = "MY_NAPS2_PROFILE"
     idempotency_key = "install_test_001"
 } | ConvertTo-Json
 
@@ -176,6 +176,6 @@ C:\Program Files\Aerotech Docflow\                программа
 C:\ProgramData\Aerotech Docflow\config\config.toml
 C:\ProgramData\Aerotech Docflow\logs\             application logs
 C:\ProgramData\Aerotech Docflow\data\idempotency\
-D:\incoming\                                       временные сканы и lock
-D:\Archive\                                        архив PDF
+C:\ProgramData\Aerotech Docflow\incoming\          временные сканы и lock
+D:\REPLACE_WITH_ARCHIVE_ROOT\                        архив PDF
 ```

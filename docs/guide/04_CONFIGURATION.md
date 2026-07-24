@@ -9,6 +9,12 @@ C:\ProgramData\Aerotech Docflow\config\config.toml
 Файл `config.example.toml` в исходном проекте и пакете — только development-
 пример. Установленная программа читает рабочий `config.toml` из `ProgramData`.
 
+В репозитории production-настройки представлены только обезличенным шаблоном
+`packaging/config.production.example.toml`. Во время сборки он попадает в пакет
+под именами `config.production.toml` (редактируемая копия перед установкой) и
+`config.production.example.toml` (чистый эталон). Реальные пути, профиль,
+archive ID, токены и другие машинные значения нельзя добавлять в Git.
+
 ## Как выбирается файл
 
 Порядок определения пути:
@@ -108,7 +114,7 @@ Marker имеет вид:
 ```json
 {
   "marker": "aerotech-docflow-archive-v1",
-  "archive_id": "aerotech-primary-archive"
+  "archive_id": "REPLACE_WITH_UNIQUE_ARCHIVE_ID"
 }
 ```
 

@@ -4,6 +4,11 @@
 окружения. Полный пример находится в `config.example.toml`; прежний контракт
 переменных перечислен в `.env.example`.
 
+Production-шаблон исходного проекта находится в
+`packaging/config.production.example.toml`. Сборка копирует его в пакет как
+редактируемый `config/config.production.toml`. Реальные машинные конфиги не
+отслеживаются Git. Всегда редактируйте копию шаблона, а не сам `.example`-файл.
+
 Приоритет:
 
 ```text
@@ -29,9 +34,9 @@ python -m app.cli --config .\config.toml show-config
 
 ```powershell
 $env:NAPS2_EXECUTABLE = "C:\Program Files\NAPS2\NAPS2.Console.exe"
-$env:NAPS2_PROFILE = "EPSON DS-790WN"
-$env:SCANNER_INCOMING_DIR = "D:\incoming"
-$env:ARCHIVE_ROOT = "D:\archive_test"
+$env:NAPS2_PROFILE = "MY_NAPS2_PROFILE"
+$env:SCANNER_INCOMING_DIR = "C:\AerotechDocflow-Example\incoming"
+$env:ARCHIVE_ROOT = "C:\AerotechDocflow-Example\archive"
 $env:SCANNER_TIMEOUT_SECONDS = "180"
 ```
 
@@ -39,7 +44,7 @@ $env:SCANNER_TIMEOUT_SECONDS = "180"
 
 ## Профиль NAPS2
 
-В профиле `EPSON DS-790WN` рекомендуется:
+В выбранном профиле `MY_NAPS2_PROFILE` рекомендуется:
 
 ```text
 Драйвер: ESCL
@@ -57,7 +62,7 @@ $env:SCANNER_TIMEOUT_SECONDS = "180"
 По умолчанию:
 
 ```text
-D:\archive_test\2026\УПД\УПД_260710_101025_2455B.pdf
+C:\AerotechDocflow-Example\archive\2026\TYPE_A\TYPE_A_260710_101025_2455B.pdf
 ```
 
 ## Обязательный production-режим
@@ -69,15 +74,15 @@ $env:DOCFLOW_ENV = "production"
 $env:DOCFLOW_VERSION = "1.0.0"
 $env:ARCHIVE_ROOT = "D:\real_archive"
 $env:DOCFLOW_ARCHIVE_CONFIRMATION = "D:\real_archive"
-$env:DOCFLOW_ARCHIVE_ID = "aerotech-primary-archive"
-$env:SCANNER_INCOMING_DIR = "D:\incoming"
+$env:DOCFLOW_ARCHIVE_ID = "REPLACE_WITH_UNIQUE_ARCHIVE_ID"
+$env:SCANNER_INCOMING_DIR = "C:\AerotechDocflow-Example\incoming"
 $env:NAPS2_EXECUTABLE = "C:\Program Files\NAPS2\NAPS2.Console.exe"
-$env:NAPS2_PROFILE = "EPSON DS-790WN"
+$env:NAPS2_PROFILE = "MY_NAPS2_PROFILE"
 $env:DOCFLOW_ALLOWED_DOC_TYPES = "НКЛ,УПД"
 $env:DOCFLOW_MIN_DOCUMENT_YEAR = "2020"
 $env:DOCFLOW_MAX_DOCUMENT_YEAR = "2030"
-$env:DOCFLOW_LOG_DIR = "D:\incoming\_logs"
-$env:DOCFLOW_IDEMPOTENCY_DIR = "D:\incoming\_idempotency"
+$env:DOCFLOW_LOG_DIR = "C:\AerotechDocflow-Example\logs"
+$env:DOCFLOW_IDEMPOTENCY_DIR = "C:\AerotechDocflow-Example\idempotency"
 ```
 
 Каталоги архива, incoming, логов и idempotency создаются заранее. Production:
@@ -94,7 +99,7 @@ $env:DOCFLOW_IDEMPOTENCY_DIR = "D:\incoming\_idempotency"
 ```json
 {
   "marker": "aerotech-docflow-archive-v1",
-  "archive_id": "aerotech-primary-archive"
+  "archive_id": "REPLACE_WITH_UNIQUE_ARCHIVE_ID"
 }
 ```
 

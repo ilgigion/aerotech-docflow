@@ -43,7 +43,7 @@ Invoke-RestMethod `
 Передаёт результат одной команды следующей:
 
 ```powershell
-Get-ChildItem "D:\Archive" -Recurse -File |
+Get-ChildItem "D:\REPLACE_WITH_ARCHIVE_ROOT" -Recurse -File |
   Get-FileHash -Algorithm SHA256
 ```
 
@@ -54,7 +54,7 @@ $body = @{
     task_id = "53243"
     doc_type = "НКЛ"
     document_number = "001"
-    scanner_profile = "EPSON DS-790WN"
+    scanner_profile = "MY_NAPS2_PROFILE"
 } | ConvertTo-Json
 ```
 
@@ -78,8 +78,8 @@ $installed = "C:\Program Files\Aerotech Docflow"
 $data = "C:\ProgramData\Aerotech Docflow"
 $exe = "$installed\app\aerotech-docflow.exe"
 $config = "$data\config\config.toml"
-$incoming = "D:\incoming"
-$archive = "D:\Archive"
+$incoming = "C:\ProgramData\Aerotech Docflow\incoming"
+$archive = "D:\REPLACE_WITH_ARCHIVE_ROOT"
 ```
 
 ## Команды только чтения
@@ -133,7 +133,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/scan" ...
 .\cleanup_previous_install.ps1
 Start-Service AerotechDocflow
 Stop-Service AerotechDocflow
-Remove-Item "D:\incoming\.scanner.lock"
+Remove-Item "C:\ProgramData\Aerotech Docflow\incoming\.scanner.lock"
 ```
 
 Последняя команда запрещена без stale-диагностики.

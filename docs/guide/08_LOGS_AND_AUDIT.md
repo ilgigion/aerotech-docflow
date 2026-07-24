@@ -113,7 +113,7 @@ SHA-256:
 
 ```powershell
 Get-FileHash `
-  "D:\Archive\2026\НКЛ\НКЛ_260721_135000_001.pdf" `
+  "D:\REPLACE_WITH_ARCHIVE_ROOT\2026\TYPE_A\TYPE_A_260721_135000_001.pdf" `
   -Algorithm SHA256
 ```
 

@@ -19,6 +19,7 @@ MODULES = [
     "tests.unit.run_incoming_cleanup_test",
     "tests.unit.run_api_test",
     "tests.unit.run_updater_package_test",
+    "tests.unit.run_updater_windows_paths_test",
     "tests.unit.run_updater_selection_test",
     "tests.unit.run_updater_transaction_test",
     "tests.unit.run_updater_setup_test",

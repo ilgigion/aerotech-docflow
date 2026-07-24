@@ -100,6 +100,7 @@ Updater показывает видимые проверки:
 - отсутствие лишних файлов;
 - версия и `config_schema`;
 - production `preflight` нового EXE с текущим конфигом;
+- наличие и SHA-256 действующего `service\docflow-service.xml`;
 - отсутствие NAPS2;
 - отсутствие `<incoming>\.scanner.lock`.
 
@@ -135,8 +136,14 @@ C:\Temp\Aerotech Docflow\rollback
 C:\Program Files\Aerotech Docflow
 ```
 
-Учётная запись существующей Windows-службы не изменяется. Рабочий WinSW XML
-создаётся из шаблона с прежним путём конфига.
+Учётная запись существующей Windows-службы не изменяется. Updater переносит
+действующий `service\docflow-service.xml` байт-в-байт и повторно проверяет его
+SHA-256. Благодаря этому сохраняются путь к `config.toml`, service account,
+`logpath`, параметры перезапуска и остальные настройки WinSW. Шаблон из нового
+ZIP не заменяет рабочий XML существующей службы.
+
+Путь пакетов всегда абсолютный: `C:\Temp\Aerotech Docflow`. Значение
+`SystemDrive=C:` не преобразуется в относительный путь `C:Temp\...`.
 
 ## Проверка результата
 

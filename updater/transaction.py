@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import os
@@ -20,7 +21,6 @@ from updater.windows import (
     assert_docflow_process_stopped,
     assert_scanner_idle,
     incoming_from_config,
-    render_service_xml,
     run_preflight,
     service_state,
     start_service,
@@ -34,6 +34,7 @@ class PreparedUpdate:
     installed: VersionInfo
     package: ValidatedPackage
     incoming: Path
+    service_xml_sha256: str
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,8 @@ def _is_reparse_point(path: Path) -> bool:
         attributes = path.lstat().st_file_attributes
     except AttributeError:
         return path.is_symlink()
+    except OSError:
+        return False
     return bool(attributes & 0x400)
 
 
@@ -87,6 +90,45 @@ def _remove_managed(path: Path, expected: Path) -> None:
     path = _assert_exact_path(path, expected)
     if path.exists():
         shutil.rmtree(path)
+
+
+def _service_xml_sha256(path: Path) -> str:
+    if path.is_symlink() or _is_reparse_point(path):
+        raise UpdaterError("SERVICE_XML_UNSAFE", f"WinSW XML не должен быть ссылкой: {path}")
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise UpdaterError("SERVICE_XML_MISSING", f"Рабочий WinSW XML не найден: {path}") from exc
+    if not path.is_file() or size == 0 or size > 1024 * 1024:
+        raise UpdaterError("SERVICE_XML_INVALID", f"Некорректный размер рабочего WinSW XML: {path}")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError as exc:
+        raise UpdaterError("SERVICE_XML_READ_FAILED", f"Не удалось прочитать WinSW XML: {path}") from exc
+    return digest.hexdigest()
+
+
+def _preserve_service_xml(source: Path, destination: Path, expected_sha256: str) -> None:
+    if _service_xml_sha256(source) != expected_sha256:
+        raise UpdaterError("SERVICE_XML_CHANGED", "Рабочий WinSW XML изменился во время обновления.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    temporary.unlink(missing_ok=True)
+    try:
+        with source.open("rb") as input_stream, temporary.open("xb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+        if _service_xml_sha256(temporary) != expected_sha256:
+            raise UpdaterError("SERVICE_XML_COPY_MISMATCH", "Копия рабочего WinSW XML имеет другой SHA-256.")
+        os.replace(temporary, destination)
+        if _service_xml_sha256(destination) != expected_sha256:
+            raise UpdaterError("SERVICE_XML_COPY_MISMATCH", "Установленный WinSW XML имеет другой SHA-256.")
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class UpdateTransaction:
@@ -141,6 +183,8 @@ class UpdateTransaction:
             raise UpdaterError("INSTALLATION_INVALID", f"Приложение не найдено: {self.installed_executable}")
         if not self.paths.config_path.is_file():
             raise UpdaterError("CONFIG_NOT_FOUND", f"Рабочий конфиг не найден: {self.paths.config_path}")
+        service_xml = self.paths.install_dir / "service" / "docflow-service.xml"
+        service_xml_sha256 = _service_xml_sha256(service_xml)
 
         def report_invalid(path: Path, error: UpdaterError) -> None:
             self.logger.warning("Rejected package=%s code=%s reason=%s", path, error.code, error.message)
@@ -161,7 +205,12 @@ class UpdateTransaction:
             package.version.version,
             package.zip_path,
         )
-        return PreparedUpdate(installed=installed, package=package, incoming=incoming)
+        return PreparedUpdate(
+            installed=installed,
+            package=package,
+            incoming=incoming,
+            service_xml_sha256=service_xml_sha256,
+        )
 
     def apply(
         self,
@@ -190,6 +239,9 @@ class UpdateTransaction:
             shutdown_started = True
             assert_docflow_process_stopped()
             assert_scanner_idle(prepared.incoming)
+            current_service_xml = install / "service" / "docflow-service.xml"
+            if _service_xml_sha256(current_service_xml) != prepared.service_xml_sha256:
+                raise UpdaterError("SERVICE_XML_CHANGED", "Рабочий WinSW XML изменился после подготовки.")
 
             progress(3, 6, "Создание резервной копии...")
             os.replace(install, rollback)
@@ -197,11 +249,12 @@ class UpdateTransaction:
 
             progress(4, 6, "Установка новой версии...")
             os.replace(unpacked, install)
-            render_service_xml(
-                install / "service" / "docflow-service.xml.template",
+            _preserve_service_xml(
+                rollback / "service" / "docflow-service.xml",
                 install / "service" / "docflow-service.xml",
-                self.paths,
+                prepared.service_xml_sha256,
             )
+            self.logger.info("Preserved WinSW service XML sha256=%s", prepared.service_xml_sha256)
 
             progress(5, 6, "Запуск службы...")
             start_service()

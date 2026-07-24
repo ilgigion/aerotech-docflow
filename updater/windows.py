@@ -4,7 +4,6 @@ from contextlib import contextmanager
 import csv
 import ctypes
 from dataclasses import dataclass
-import html
 import json
 import logging
 import os
@@ -21,6 +20,16 @@ from updater.errors import UpdaterError
 SERVICE_NAME = "AerotechDocflow"
 MUTEX_NAME = r"Global\AerotechDocflowUpdater"
 HEALTH_URL = "http://127.0.0.1:8000/health"
+
+
+def _system_drive_root(value: str) -> Path:
+    match = re.fullmatch(r"([A-Za-z]):[\\/]*", value.strip())
+    if not match:
+        raise UpdaterError(
+            "PATH_RESOLUTION_FAILED",
+            f"Некорректный абсолютный SystemDrive: {value!r}.",
+        )
+    return Path(f"{match.group(1).upper()}:\\")
 
 
 @dataclass(frozen=True)
@@ -46,7 +55,7 @@ class UpdaterPaths:
         if _is_64bit_windows() and program_files_path.name.casefold() == "program files (x86)":
             raise UpdaterError("PATH_RESOLUTION_FAILED", "Запрещён путь Program Files (x86).")
         program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Aerotech Docflow"
-        temp_root = Path(os.environ.get("SystemDrive", "C:")) / "Temp" / "Aerotech Docflow"
+        temp_root = _system_drive_root(os.environ.get("SystemDrive", "C:")) / "Temp" / "Aerotech Docflow"
         public = Path(os.environ.get("PUBLIC", r"C:\Users\Public"))
         return cls(
             install_dir=program_files_path / "Aerotech Docflow",
@@ -328,31 +337,6 @@ def read_current_health() -> dict | None:
     if not isinstance(payload, dict) or payload.get("status") != "ok" or payload.get("service") != "aerotech-docflow":
         return None
     return payload
-
-
-def render_service_xml(template: Path, output: Path, paths: UpdaterPaths) -> None:
-    try:
-        text = template.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise UpdaterError("SERVICE_XML_FAILED", f"Не удалось прочитать шаблон службы: {exc}") from exc
-    replacements = {
-        "__SERVICE_ACCOUNT__": "",
-        "__DOCFLOW_EXE__": html.escape(str(paths.install_dir / "app" / "aerotech-docflow.exe"), quote=True),
-        "__CONFIG_PATH__": html.escape(str(paths.config_path), quote=True),
-        "__APP_DIR__": html.escape(str(paths.install_dir / "app"), quote=True),
-        "__SERVICE_LOG_DIR__": html.escape(str(paths.program_data_dir / "service-logs"), quote=True),
-    }
-    for marker, value in replacements.items():
-        text = text.replace(marker, value)
-    if re.search(r"__[A-Z0-9_]+__", text):
-        raise UpdaterError("SERVICE_XML_FAILED", "В шаблоне службы остались незаполненные маркеры.")
-    temporary = output.with_name(output.name + ".tmp")
-    try:
-        temporary.write_text(text, encoding="utf-8", newline="\n")
-        os.replace(temporary, output)
-    except OSError as exc:
-        temporary.unlink(missing_ok=True)
-        raise UpdaterError("SERVICE_XML_FAILED", f"Не удалось создать XML службы: {exc}") from exc
 
 
 def probe_version_command(executable: Path) -> str | None:

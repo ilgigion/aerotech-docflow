@@ -197,6 +197,9 @@ run          запустить FastAPI
 | `CONFIG_SCHEMA_MISMATCH` | Пакет требует другую схему рабочего конфига |
 | `SCANNER_ACTIVE` | Запущен NAPS2 или существует `.scanner.lock` |
 | `PREFLIGHT_FAILED` | Новый EXE не прошёл проверку текущего конфига |
+| `SERVICE_XML_MISSING` | Не найден рабочий `service\docflow-service.xml`; переключение не начинается |
+| `SERVICE_XML_CHANGED` | Рабочий WinSW XML изменился между проверкой и переключением |
+| `SERVICE_XML_COPY_MISMATCH` | Сохранённый WinSW XML не прошёл проверку SHA-256 |
 | `POST_INSTALL_HEALTH_FAILED` | Новая служба не подтвердила версию и состояние |
 | `ROLLBACK_FAILED` | Не удалось автоматически вернуть старую службу |
 | `LEGACY_VERSION_UNKNOWN` | Setup не смог однозначно определить старую версию |

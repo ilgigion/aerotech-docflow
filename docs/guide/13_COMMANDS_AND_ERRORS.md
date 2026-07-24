@@ -71,6 +71,37 @@ $body = @{
 
 В PowerShell используется один `\`. Двойной `\\` нужен внутри TOML/JSON-строк.
 
+### Чтение UTF-8 логов в старом Windows PowerShell 5.1
+
+Логи приложения записываются в UTF-8. Старый PowerShell при обычном
+`Get-Content FILE` может ошибочно прочитать UTF-8 как системную ANSI-кодировку.
+Это портит только отображение: содержимое файла остаётся корректным.
+
+Всегда указывайте кодировку явно:
+
+```powershell
+Get-Content "C:\ProgramData\Aerotech Docflow\logs\updater.log" -Encoding UTF8
+```
+
+Последние 100 строк с автоматическим ожиданием новых записей:
+
+```powershell
+Get-Content "C:\ProgramData\Aerotech Docflow\logs\updater.log" `
+  -Encoding UTF8 `
+  -Tail 100 `
+  -Wait
+```
+
+Поиск в UTF-8 логе:
+
+```powershell
+Get-Content "C:\ProgramData\Aerotech Docflow\logs\updater.log" -Encoding UTF8 |
+  Select-String -Pattern "ERROR|CRITICAL"
+```
+
+Для машинного разбора `show-config` используйте параметр `--ascii`: кириллица
+в JSON будет передана как `\uXXXX` и не будет зависеть от кодовой страницы.
+
 ## Базовые переменные
 
 ```powershell

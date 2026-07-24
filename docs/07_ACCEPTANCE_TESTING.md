@@ -68,14 +68,20 @@ python -m tests.acceptance.run_acceptance_tests request `
   --scenario 1 `
   --task-id "ACC-001" `
   --doc-type "НКЛ" `
-  --document-datetime "2026-07-16T12:00:00" `
   --document-number "001" `
+  --scanner-profile "EPSON DS-790WN" `
   --confirm-real-scan
 ```
 
 Runner сохраняет тело запроса, ответ, HTTP status и снимки тестового архива до и
 после. Флаг `--confirm-real-scan` обязателен, чтобы физический скан нельзя было
 запустить случайно.
+
+Для сценария 12 передайте профиль параметром скрипта:
+
+```powershell
+& "$run\scenario_12\run_20_documents.ps1" -ScannerProfile "EPSON DS-790WN"
+```
 
 Для localhost runner использует HTTP-клиент с `trust_env=False`: переменные
 `HTTP_PROXY`/`HTTPS_PROXY`, установленные VPN, не могут перенаправить запрос к

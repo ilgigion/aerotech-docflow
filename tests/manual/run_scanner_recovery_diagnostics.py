@@ -1,7 +1,10 @@
 from pathlib import Path
 import argparse
 import json
+import os
 
+from app.configuration import apply_configuration
+from app.production_config import load_runtime_safety_config
 from app.scanner_recovery import (
     diagnose_scanner_state,
     emergency_recover_after_interruption,
@@ -54,19 +57,20 @@ def print_report(incoming_dir: Path, archive_root: Path, stale_after_seconds: in
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--incoming", default=r"D:\incoming")
-parser.add_argument("--archive", default=r"D:\archive_test")
-parser.add_argument("--stale-after-seconds", type=int, default=30 * 60)
+parser.add_argument("--config", required=True)
 parser.add_argument("--kill-naps2", action="store_true")
 parser.add_argument("--remove-stale-lock", action="store_true")
 parser.add_argument("--remove-lock", action="store_true")
 parser.add_argument("--cleanup-artifacts", action="store_true")
 args = parser.parse_args()
 
-incoming_dir = Path(args.incoming)
-archive_root = Path(args.archive)
+apply_configuration(args.config)
+runtime = load_runtime_safety_config()
+incoming_dir = runtime.incoming_dir
+archive_root = runtime.archive_root
+stale_after_seconds = int(os.environ["SCANNER_LOCK_STALE_SECONDS"])
 
-print_report(incoming_dir, archive_root, args.stale_after_seconds)
+print_report(incoming_dir, archive_root, stale_after_seconds)
 
 if args.kill_naps2 or args.remove_lock or args.remove_stale_lock or args.cleanup_artifacts:
     print()
@@ -77,9 +81,9 @@ if args.kill_naps2 or args.remove_lock or args.remove_stale_lock or args.cleanup
         kill_naps2=args.kill_naps2,
         remove_lock=args.remove_lock,
         remove_stale_lock=args.remove_stale_lock,
-        stale_after_seconds=args.stale_after_seconds,
+        stale_after_seconds=stale_after_seconds,
         cleanup_artifacts=args.cleanup_artifacts,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
-    print_report(incoming_dir, archive_root, args.stale_after_seconds)
+    print_report(incoming_dir, archive_root, stale_after_seconds)

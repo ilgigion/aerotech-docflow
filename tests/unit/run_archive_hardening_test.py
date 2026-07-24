@@ -41,12 +41,10 @@ from app.storage import (
 assert build_request_fingerprint(
     task_id="T1",
     doc_type="НКЛ",
-    document_datetime="2026-07-16T12:00:00",
     document_number="A/B",
 ) != build_request_fingerprint(
     task_id="T1",
     doc_type="НКЛ",
-    document_datetime="2026-07-16T12:00:00",
     document_number="A\\B",
 )
 
@@ -55,8 +53,8 @@ try:
         ScanRequest(
             task_id="T1",
             doc_type="НКЛ",
-            document_datetime="2026-07-16T12:00:00",
             document_number="A/B",
+            scanner_profile="UNIT PROFILE",
         )
     )
     raise AssertionError("Lossy document identity must be rejected")
@@ -101,7 +99,7 @@ with tempfile.TemporaryDirectory() as tmp:
         operation_id="CONCURRENT",
         task_id="TASK",
         doc_type="НКЛ",
-        document_datetime="2026-07-16T12:00:00",
+        document_datetime="",
         document_number="001",
         expected_file_name="file.pdf",
     )
@@ -123,7 +121,6 @@ with tempfile.TemporaryDirectory() as tmp:
     fingerprint = build_request_fingerprint(
         task_id="TASK",
         doc_type="НКЛ",
-        document_datetime="2026-07-16T12:00:00",
         document_number="001",
     )
     record = IdempotencyRecord(
@@ -147,9 +144,7 @@ with tempfile.TemporaryDirectory() as tmp:
             operation_id="NEW",
             task_id=record.task_id,
             doc_type=record.doc_type,
-            document_datetime=record.document_datetime,
             document_number=record.document_number,
-            expected_file_name=record.expected_file_name,
             settings=IdempotencySettings(record_dir=records),
             incoming_dir=incoming,
             archive_root=archive,
@@ -286,13 +281,26 @@ with tempfile.TemporaryDirectory() as tmp:
             {
                 "DOCFLOW_ENV": "production",
                 "DOCFLOW_VERSION": "1.0.0-rc1-test",
+                "DOCFLOW_HOST": "127.0.0.1",
+                "DOCFLOW_PORT": "8000",
                 "ARCHIVE_ROOT": str(archive),
                 "DOCFLOW_ARCHIVE_CONFIRMATION": str(archive.resolve()),
                 "DOCFLOW_ARCHIVE_ID": "unit-real-archive",
                 "SCANNER_INCOMING_DIR": str(incoming),
                 "NAPS2_EXECUTABLE": str(naps2),
                 "NAPS2_PROFILE": "TEST PROFILE",
+                "NAPS2_OUTPUT_ENCODING": "utf-8",
+                "SCANNER_TIMEOUT_SECONDS": "180",
+                "SCANNER_TIMEOUT_KILL_GRACE_SECONDS": "10",
+                "SCANNER_VERIFY_PROCESS_EXIT_SECONDS": "5",
+                "SCANNER_QUARANTINE_FAILED_OUTPUTS": "1",
+                "SCANNER_FAILED_SCAN_DIR_NAME": "_failed_runtime",
+                "SCANNER_MIN_PDF_SIZE_BYTES": "100",
+                "SCANNER_MIN_PDF_PAGES": "1",
+                "SCANNER_STABLE_CHECKS": "2",
+                "SCANNER_STABLE_INTERVAL_SECONDS": "0.5",
                 "DOCFLOW_LOG_DIR": str(logs),
+                "DOCFLOW_LOG_LEVEL": "INFO",
                 "DOCFLOW_LOG_MAX_BYTES": "52428800",
                 "DOCFLOW_LOG_BACKUP_COUNT": "5",
                 "DOCFLOW_LOG_RETENTION_MONTHS": "12",
@@ -304,6 +312,19 @@ with tempfile.TemporaryDirectory() as tmp:
                 "DOCFLOW_MONTHLY_FILE_LOGS": "1",
                 "DOCFLOW_IDEMPOTENCY_STALE_SECONDS": "1800",
                 "STORAGE_RESERVATION_STALE_AFTER_SECONDS": "1800",
+                "STORAGE_COPY_BUFFER_SIZE": "1048576",
+                "STORAGE_KEEP_TEMP_ON_ERROR": "0",
+                "SCANNER_LOCK_STALE_SECONDS": "1800",
+                "SCANNER_LOCK_WAIT_TIMEOUT_SECONDS": "0",
+                "SCANNER_LOCK_RETRY_INTERVAL_SECONDS": "0.5",
+                "SCANNER_LOCK_ALLOW_STALE_TAKEOVER": "1",
+                "INCOMING_CLEANUP_QUARANTINE_DIR_NAME": "_failed",
+                "INCOMING_CLEANUP_MANAGED_PREFIX": "PF_",
+                "INCOMING_CLEANUP_MANAGED_SUFFIX": ".pdf",
+                "INCOMING_CLEANUP_MIN_AGE_SECONDS": "86400",
+                "INCOMING_CLEANUP_SKIP_IF_LOCK_EXISTS": "1",
+                "INCOMING_CLEANUP_STABLE_CHECKS": "2",
+                "INCOMING_CLEANUP_STABLE_INTERVAL_SECONDS": "0.2",
             }
         )
         config = validate_runtime_environment()

@@ -100,6 +100,26 @@ class ScannerLockSettings:
     allow_stale_takeover: bool = True
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def load_lock_settings_from_env() -> ScannerLockSettings:
+    return ScannerLockSettings(
+        stale_after_seconds=int(os.getenv("SCANNER_LOCK_STALE_SECONDS", "1800")),
+        wait_timeout_seconds=float(
+            os.getenv("SCANNER_LOCK_WAIT_TIMEOUT_SECONDS", "0")
+        ),
+        retry_interval_seconds=float(
+            os.getenv("SCANNER_LOCK_RETRY_INTERVAL_SECONDS", "0.5")
+        ),
+        allow_stale_takeover=_env_flag("SCANNER_LOCK_ALLOW_STALE_TAKEOVER", True),
+    )
+
+
 @dataclass(frozen=True)
 class LockInfo:
     operation_id: str

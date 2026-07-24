@@ -189,8 +189,8 @@ def find_archive_artifacts(archive_root: Path, pattern: str, limit: int = 100) -
 
 
 def diagnose_scanner_state(
-    incoming_dir: Path | str = Path(r"D:\incoming"),
-    archive_root: Path | str = Path(r"D:\archive_test"),
+    incoming_dir: Path | str,
+    archive_root: Path | str,
     *,
     lock_stale_after_seconds: int = 30 * 60,
 ) -> ScannerStateReport:
@@ -222,7 +222,7 @@ def diagnose_scanner_state(
 
 
 def recover_stale_lock_if_safe(
-    incoming_dir: Path | str = Path(r"D:\incoming"),
+    incoming_dir: Path | str,
     *,
     stale_after_seconds: int = 30 * 60,
 ) -> StaleLockRecoveryResult:
@@ -279,7 +279,7 @@ def recover_stale_lock_if_safe(
 
 
 def remove_scanner_lock(
-    incoming_dir: Path | str = Path(r"D:\incoming"),
+    incoming_dir: Path | str,
     *,
     stale_after_seconds: int = 30 * 60,
 ) -> bool:
@@ -292,7 +292,7 @@ def remove_scanner_lock(
 
 
 def cleanup_archive_artifacts(
-    archive_root: Path | str = Path(r"D:\archive_test"),
+    archive_root: Path | str,
     *,
     stale_after_seconds: int = 30 * 60,
     remove_unowned_temp: bool = False,
@@ -378,8 +378,8 @@ def cleanup_archive_artifacts(
 
 
 def emergency_recover_after_interruption(
-    incoming_dir: Path | str = Path(r"D:\incoming"),
-    archive_root: Path | str = Path(r"D:\archive_test"),
+    incoming_dir: Path | str,
+    archive_root: Path | str,
     *,
     kill_naps2: bool = True,
     remove_lock: bool = False,

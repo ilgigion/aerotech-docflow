@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 import locale
 import logging
 import os
@@ -11,9 +12,28 @@ import secrets
 import shutil
 import subprocess
 import time
+import unicodedata
 
 
 logger = logging.getLogger(__name__)
+MAX_SCANNER_PROFILE_LENGTH = 200
+
+
+def validate_scanner_profile_name(value: str) -> str:
+    """Return a safe, exact NAPS2 profile name."""
+
+    if not isinstance(value, str):
+        raise ValueError("scanner_profile must be a string")
+    profile_name = value.strip()
+    if not profile_name:
+        raise ValueError("scanner_profile must not be blank")
+    if len(profile_name) > MAX_SCANNER_PROFILE_LENGTH:
+        raise ValueError(
+            f"scanner_profile must contain at most {MAX_SCANNER_PROFILE_LENGTH} characters"
+        )
+    if any(unicodedata.category(character).startswith("C") for character in profile_name):
+        raise ValueError("scanner_profile contains control or formatting characters")
+    return profile_name
 
 
 @dataclass(frozen=True)
@@ -133,13 +153,13 @@ class ScannerSettings:
         NAPS2.Console.exe -o output.pdf --noprofile --driver ... --device ...
     """
 
-    naps2_executable: Path = Path(r"C:\Program Files\NAPS2\NAPS2.Console.exe")
-    incoming_dir: Path = Path(r"D:\incoming")
+    naps2_executable: Path | None = None
+    incoming_dir: Path | None = None
 
     profile_name: str | None = None
 
-    driver: str = "twain"
-    device_name: str = "Canon G600 series Network"
+    driver: str = ""
+    device_name: str = ""
     source: str | None = None
     dpi: int | None = None
     page_size: str | None = None
@@ -175,6 +195,20 @@ class ScannerSettings:
 
 
 def load_settings_from_env() -> ScannerSettings:
+    naps2_executable = os.getenv("NAPS2_EXECUTABLE", "").strip()
+    incoming_dir = os.getenv("SCANNER_INCOMING_DIR", "").strip()
+    if not naps2_executable:
+        raise ScannerInvalidSettingsError(
+            code="missing_naps2_executable",
+            operator_message="Не настроен путь к NAPS2. Обратитесь к администратору.",
+            technical_message="NAPS2_EXECUTABLE is empty; set scanner.naps2_executable in config.toml",
+        )
+    if not incoming_dir:
+        raise ScannerInvalidSettingsError(
+            code="missing_scanner_incoming_dir",
+            operator_message="Не настроена временная папка сканирования. Обратитесь к администратору.",
+            technical_message="SCANNER_INCOMING_DIR is empty; set scanner.incoming_dir in config.toml",
+        )
     profile_name = os.getenv("NAPS2_PROFILE", "").strip()
     if profile_name == "":
         profile_name = None
@@ -188,16 +222,11 @@ def load_settings_from_env() -> ScannerSettings:
     bit_depth = os.getenv("SCANNER_BIT_DEPTH", "").strip() or None
 
     return ScannerSettings(
-        naps2_executable=Path(
-            os.getenv(
-                "NAPS2_EXECUTABLE",
-                r"C:\Program Files\NAPS2\NAPS2.Console.exe",
-            )
-        ),
-        incoming_dir=Path(os.getenv("SCANNER_INCOMING_DIR", r"D:\incoming")),
+        naps2_executable=Path(naps2_executable),
+        incoming_dir=Path(incoming_dir),
         profile_name=profile_name,
-        driver=os.getenv("SCANNER_DRIVER", "twain"),
-        device_name=os.getenv("SCANNER_DEVICE_NAME", "Canon G600 series Network"),
+        driver=os.getenv("SCANNER_DRIVER", "").strip(),
+        device_name=os.getenv("SCANNER_DEVICE_NAME", "").strip(),
         source=source,
         dpi=int(dpi_value) if dpi_value else None,
         page_size=page_size,
@@ -208,12 +237,26 @@ def load_settings_from_env() -> ScannerSettings:
         quarantine_failed_scan_outputs=os.getenv("SCANNER_QUARANTINE_FAILED_OUTPUTS", "1").strip() != "0",
         failed_scan_dir_name=os.getenv("SCANNER_FAILED_SCAN_DIR_NAME", "_failed_runtime"),
         min_pdf_size_bytes=int(os.getenv("SCANNER_MIN_PDF_SIZE_BYTES", "100")),
+        stable_checks=int(os.getenv("SCANNER_STABLE_CHECKS", "2")),
+        stable_interval_seconds=float(os.getenv("SCANNER_STABLE_INTERVAL_SECONDS", "0.5")),
         naps2_output_encoding=os.getenv("NAPS2_OUTPUT_ENCODING", "").strip() or None,
         min_pdf_pages=int(os.getenv("SCANNER_MIN_PDF_PAGES", "1")),
     )
 
 
 def validate_scanner_settings(settings: ScannerSettings) -> None:
+    if settings.naps2_executable is None:
+        raise ScannerInvalidSettingsError(
+            code="missing_naps2_executable",
+            operator_message="Не настроен путь к NAPS2. Обратитесь к администратору.",
+            technical_message="ScannerSettings.naps2_executable is None",
+        )
+    if settings.incoming_dir is None:
+        raise ScannerInvalidSettingsError(
+            code="missing_scanner_incoming_dir",
+            operator_message="Не настроена временная папка сканирования. Обратитесь к администратору.",
+            technical_message="ScannerSettings.incoming_dir is None",
+        )
     if settings.timeout_seconds <= 0:
         raise ScannerInvalidSettingsError(
             code="invalid_scanner_timeout",
@@ -1119,6 +1162,7 @@ def scan_document(
     task_id: int | str,
     settings: ScannerSettings | None = None,
     operation_id: str | None = None,
+    on_scan_start: Callable[[], None] | None = None,
 ) -> Path:
     if settings is None:
         settings = load_settings_from_env()
@@ -1136,6 +1180,12 @@ def scan_document(
         settings=settings,
         output_path=output_path,
     )
+
+    # The callback is deliberately invoked after all local preparation and
+    # immediately before starting NAPS2. The document flow uses this instant
+    # as the authoritative Europe/Moscow timestamp for the archive filename.
+    if on_scan_start is not None:
+        on_scan_start()
 
     run_naps2(
         command=command,

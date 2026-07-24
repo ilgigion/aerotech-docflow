@@ -1,5 +1,4 @@
 from pathlib import Path
-from datetime import datetime
 import tempfile
 
 from app.document_flow import _resolve_idempotency_path_within
@@ -61,9 +60,7 @@ with tempfile.TemporaryDirectory() as tmp:
     request_args = {
         "task_id": "TASK",
         "doc_type": "УПД",
-        "document_datetime": datetime(2026, 7, 10, 10, 10, 25),
         "document_number": "2455B",
-        "expected_file_name": "УПД_260710_101025_2455B.pdf",
         "settings": settings,
         "incoming_dir": incoming,
         "archive_root": archive,

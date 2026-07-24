@@ -45,8 +45,9 @@ def run(args: argparse.Namespace) -> None:
     os.environ["DOCFLOW_LOG_DIR"] = str(logs)
     marker = root / "crash_marker.json"
 
-    def fake_scan_document(*, task_id: str, settings: ScannerSettings, operation_id: str) -> Path:
+    def fake_scan_document(*, task_id: str, settings: ScannerSettings, operation_id: str, on_scan_start) -> Path:
         del task_id, operation_id
+        on_scan_start()
         source = settings.incoming_dir / "PF_ACCEPTANCE_SCENARIO_10.pdf"
         create_scan_pdf(source)
         return source
@@ -95,7 +96,6 @@ def run(args: argparse.Namespace) -> None:
     result = document_flow.process_document_scan(
         task_id=f"ACC-010-{args.case_id}",
         doc_type="НКЛ",
-        document_datetime="2026-07-16T12:40:00",
         document_number=f"010-{args.case_id}",
         scanner_settings=ScannerSettings(incoming_dir=incoming, min_pdf_size_bytes=100),
         storage_settings=StorageSettings(archive_root=archive),

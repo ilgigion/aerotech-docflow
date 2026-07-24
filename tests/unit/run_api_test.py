@@ -51,8 +51,8 @@ try:
         json={
             "task_id": "53243",
             "doc_type": "НКЛ",
-            "document_datetime": "2026-06-24T13:50:00",
             "document_number": "001",
+            "scanner_profile": "EPSON DS-790WN",
         },
     )
 finally:
@@ -64,12 +64,14 @@ assert success_response.json() == {
     "file_name": "НКЛ_260624_135000_001.pdf",
     "operation_id": "SCAN_TEST_SUCCESS",
     "task_id": "53243",
-    "idempotency_key": "planfix_53243_НКЛ_20260624T135000_001",
+    "idempotency_key": "planfix_53243_НКЛ_001",
     "scan_executed": True,
 }
 assert captured_arguments["idempotency_key"] == (
-    "planfix_53243_НКЛ_20260624T135000_001"
+    "planfix_53243_НКЛ_001"
 )
+assert "document_datetime" not in captured_arguments
+assert captured_arguments["scanner_profile"] == "EPSON DS-790WN"
 assert "file_path" not in success_response.json()
 
 
@@ -91,8 +93,8 @@ try:
         json={
             "task_id": "53243",
             "doc_type": "НКЛ",
-            "document_datetime": "2026-06-24T13:50:00",
             "document_number": "001",
+            "scanner_profile": "EPSON DS-790WN",
             "idempotency_key": "request-53243",
         },
     )
@@ -112,7 +114,6 @@ invalid_response = client.post(
     json={
         "task_id": "53243",
         "doc_type": "НКЛ",
-        "document_datetime": "not-a-date",
     },
 )
 assert invalid_response.status_code == 422, invalid_response.text
@@ -123,12 +124,37 @@ invalid_identity_response = client.post(
     json={
         "task_id": "53243",
         "doc_type": "<>",
-        "document_datetime": "2026-06-24T13:50:00",
         "document_number": "001",
+        "scanner_profile": "EPSON DS-790WN",
         "idempotency_key": "explicit-key",
     },
 )
 assert invalid_identity_response.status_code == 422, invalid_identity_response.text
 assert invalid_identity_response.json()["error_code"] == "validation_error"
+
+legacy_datetime_response = client.post(
+    "/scan",
+    json={
+        "task_id": "53243",
+        "doc_type": "НКЛ",
+        "document_datetime": "2026-06-24T13:50:00",
+        "document_number": "001",
+        "scanner_profile": "EPSON DS-790WN",
+    },
+)
+assert legacy_datetime_response.status_code == 422, legacy_datetime_response.text
+assert legacy_datetime_response.json()["error_code"] == "validation_error"
+
+invalid_profile_response = client.post(
+    "/scan",
+    json={
+        "task_id": "53243",
+        "doc_type": "НКЛ",
+        "document_number": "001",
+        "scanner_profile": "EPSON\nINJECTED",
+    },
+)
+assert invalid_profile_response.status_code == 422, invalid_profile_response.text
+assert invalid_profile_response.json()["error_code"] == "validation_error"
 
 print("API UNIT TEST OK")

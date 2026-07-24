@@ -50,6 +50,24 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
+Для установки на другие Windows-устройства реализованы единый `config.toml`,
+CLI, PyInstaller `onedir`-сборка и запуск через WinSW как Windows-служба.
+Полная инструкция: `docs/10_WINDOWS_INSTALLATION_AND_SERVICE.md`.
+Короткая чистая установка с удалением предыдущей попытки:
+`docs/11_CLEAN_INSTALLATION.md`.
+
+Основные команды из исходного кода:
+
+```powershell
+python -m app.cli --config .\config.toml show-config
+python -m app.cli --config .\config.toml preflight
+python -m app.cli --config .\config.toml diagnose
+python -m app.cli --config .\config.toml run
+```
+
+В готовой сборке `python -m app.cli` заменяется на
+`app\aerotech-docflow.exe`.
+
 `pypdf` является обязательной защитой целостности PDF. Если библиотека отсутствует
 или PDF не удаётся строго разобрать, документ не переносится в архив.
 
@@ -96,11 +114,14 @@ Invoke-RestMethod `
   -Body '{
     "task_id": "53243",
     "doc_type": "НКЛ",
-    "document_datetime": "2026-06-24T13:50:00",
     "document_number": "001",
-    "idempotency_key": "planfix_53243_НКЛ_20260624T135000_001"
+    "scanner_profile": "EPSON DS-790WN",
+    "idempotency_key": "planfix_53243_НКЛ_001"
   }'
 ```
+
+Дата и время в имени PDF фиксируются сервером непосредственно перед запуском
+NAPS2 в часовом поясе `Europe/Moscow`; клиент их не передаёт.
 
 `POST /scan` синхронно ждёт завершения текущего `document_flow` и возвращает имя
 готового файла. Очереди, worker, внешней авторизации и туннеля в этой версии нет.
@@ -133,6 +154,7 @@ python -m tests.manual.run_scan_epson_escl_duplex
 
 ## Документация
 
+- `docs/guide/README.md` — полное руководство пользователя, оператора и администратора.
 - `docs/00_OVERVIEW.md` — архитектура и состав проекта.
 - `docs/01_CONFIGURATION.md` — переменные окружения и настройки NAPS2.
 - `docs/02_OPERATIONS.md` — рабочие команды оператора/администратора.
@@ -143,6 +165,8 @@ python -m tests.manual.run_scan_epson_escl_duplex
 - `docs/07_ACCEPTANCE_TESTING.md` — приёмка перед production с логами и доказательствами.
 - `docs/08_RELEASE_CANDIDATE_2026-07-16.md` — исправления, найденные при приёмке, и статус release candidate.
 - `docs/09_PRODUCTION_ARCHIVE_HARDENING.md` — fail-closed защита реального архива и оставшиеся условия допуска.
+- `docs/10_WINDOWS_INSTALLATION_AND_SERVICE.md` — TOML-конфигурация, EXE-сборка, WinSW-служба, установка, обновление и диагностика.
+- `docs/11_CLEAN_INSTALLATION.md` — чистая установка на текущий компьютер по шагам.
 - `docs/99_CLEAN_MAIN.md` — как сделать эту чистую версию веткой `main`.
 
 ## Структура проекта

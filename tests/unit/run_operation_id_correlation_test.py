@@ -15,8 +15,9 @@ with TemporaryDirectory() as temp_dir:
     incoming.mkdir()
     captured: dict[str, str] = {}
 
-    def failed_scan(*, task_id: str, settings: ScannerSettings, operation_id: str) -> Path:
+    def failed_scan(*, task_id: str, settings: ScannerSettings, operation_id: str, on_scan_start) -> Path:
         del task_id, settings
+        on_scan_start()
         captured["operation_id"] = operation_id
         raise ScannerNoPagesError(
             code="no_scanned_pages",
@@ -30,7 +31,6 @@ with TemporaryDirectory() as temp_dir:
         result = document_flow.process_document_scan_safe(
             task_id="CORRELATION-1",
             doc_type="НКЛ",
-            document_datetime="2026-07-16T12:00:00",
             document_number="001",
             scanner_settings=ScannerSettings(incoming_dir=incoming),
             storage_settings=StorageSettings(archive_root=archive),

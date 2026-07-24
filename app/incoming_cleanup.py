@@ -87,7 +87,7 @@ class IncomingCleanupSettings:
         Дополнительная проверка, что размер файла не меняется.
     """
 
-    incoming_dir: Path = Path(r"D:\incoming")
+    incoming_dir: Path
     quarantine_dir_name: str = "_failed"
     managed_prefix: str = "PF_"
     managed_suffix: str = ".pdf"
@@ -96,6 +96,35 @@ class IncomingCleanupSettings:
     skip_if_lock_exists: bool = True
     stable_checks: int = 2
     stable_interval_seconds: float = 0.2
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def load_incoming_cleanup_settings_from_env() -> IncomingCleanupSettings:
+    incoming_dir = os.getenv("SCANNER_INCOMING_DIR", "").strip()
+    if not incoming_dir:
+        raise ValueError(
+            "SCANNER_INCOMING_DIR is empty; set scanner.incoming_dir in config.toml"
+        )
+    return IncomingCleanupSettings(
+        incoming_dir=Path(incoming_dir),
+        quarantine_dir_name=os.getenv(
+            "INCOMING_CLEANUP_QUARANTINE_DIR_NAME", "_failed"
+        ),
+        managed_prefix=os.getenv("INCOMING_CLEANUP_MANAGED_PREFIX", "PF_"),
+        managed_suffix=os.getenv("INCOMING_CLEANUP_MANAGED_SUFFIX", ".pdf"),
+        min_age_seconds=int(os.getenv("INCOMING_CLEANUP_MIN_AGE_SECONDS", "86400")),
+        skip_if_lock_exists=_env_flag("INCOMING_CLEANUP_SKIP_IF_LOCK_EXISTS", True),
+        stable_checks=int(os.getenv("INCOMING_CLEANUP_STABLE_CHECKS", "2")),
+        stable_interval_seconds=float(
+            os.getenv("INCOMING_CLEANUP_STABLE_INTERVAL_SECONDS", "0.2")
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -171,7 +200,7 @@ def build_quarantine_run_dir(
     Для каждого запуска создаём отдельную папку карантина.
 
     Пример:
-        D:\\incoming\\_failed\\20260715_103012
+        <incoming>\\_failed\\20260715_103012
     """
 
     if run_datetime is None:
@@ -432,7 +461,7 @@ def cleanup_incoming_folder(
     """
 
     if settings is None:
-        settings = IncomingCleanupSettings()
+        settings = load_incoming_cleanup_settings_from_env()
 
     incoming_dir = Path(settings.incoming_dir)
     quarantine_dir = build_quarantine_run_dir(settings)

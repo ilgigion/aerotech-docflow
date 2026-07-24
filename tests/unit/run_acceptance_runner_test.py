@@ -40,12 +40,14 @@ assert captured["url"] == "http://127.0.0.1:8000/scan"
 
 with TemporaryDirectory() as temp_dir:
     run_dir = Path(temp_dir)
-    acceptance.create_scenario12_script(run_dir)
+    acceptance.create_scenario12_script(run_dir, "http://127.0.0.1:8000/health")
     script = (run_dir / "scenario_12" / "run_20_documents.ps1").read_bytes()
     script.decode("ascii")
     text = script.decode("ascii")
     assert "Type SCAN to start" in text
     assert 'if ($confirmation -ieq "SCAN")' in text
     assert "[int]$StartAt = 1" in text
+    assert "[string]$ScannerProfile" in text
+    assert "--scanner-profile $ScannerProfile" in text
 
 print("OK: acceptance runner ignores proxies and generates guarded series script")

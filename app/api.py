@@ -20,6 +20,7 @@ from app.production_config import (
     validate_document_business_rules,
     validate_runtime_environment,
 )
+from app.scanner import MAX_SCANNER_PROFILE_LENGTH, validate_scanner_profile_name
 
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class ScanRequest(BaseModel):
     task_id: str = Field(min_length=1, max_length=120)
     doc_type: str = Field(min_length=1, max_length=30)
     document_number: str = Field(min_length=1, max_length=80)
+    scanner_profile: str = Field(min_length=1, max_length=MAX_SCANNER_PROFILE_LENGTH)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=500)
 
     @field_validator("task_id", "doc_type", "document_number")
@@ -54,6 +56,11 @@ class ScanRequest(BaseModel):
         if not value:
             raise ValueError("field must not be blank")
         return value
+
+    @field_validator("scanner_profile")
+    @classmethod
+    def validate_scanner_profile(cls, value: str) -> str:
+        return validate_scanner_profile_name(value)
 
 
 class ScanSucceededResponse(BaseModel):
@@ -195,6 +202,7 @@ def scan(payload: ScanRequest) -> ScanSucceededResponse | JSONResponse:
             task_id=payload.task_id,
             doc_type=payload.doc_type,
             document_number=payload.document_number,
+            scanner_profile=payload.scanner_profile,
             idempotency_key=effective_idempotency_key,
             operation_id=request_operation_id,
         )

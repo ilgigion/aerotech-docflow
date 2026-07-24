@@ -367,7 +367,9 @@ Set-Location "{PROJECT_ROOT}"
 def create_scenario12_script(run_dir: Path, health_url: str) -> None:
     script = f'''param(
     [ValidateRange(1, 20)]
-    [int]$StartAt = 1
+    [int]$StartAt = 1,
+    [Parameter(Mandatory = $true)]
+    [string]$ScannerProfile
 )
 
 $ErrorActionPreference = "Stop"
@@ -406,6 +408,7 @@ for ($index = $StartAt; $index -le 20; $index++) {{
         --task-id $taskId `
         --doc-type $docType `
         --document-number $documentNumber `
+        --scanner-profile $ScannerProfile `
         --confirm-real-scan
 
     if ($LASTEXITCODE -ne 0) {{
@@ -448,7 +451,7 @@ def create_manual_plan(run_dir: Path) -> None:
         "Пример запроса:",
         "",
         "```powershell",
-        f'python -m tests.acceptance.run_acceptance_tests request --run "{run_dir}" --scenario 1 --task-id "ACC-001" --doc-type "НКЛ" --document-number "001" --confirm-real-scan',
+        f'python -m tests.acceptance.run_acceptance_tests request --run "{run_dir}" --scenario 1 --task-id "ACC-001" --doc-type "НКЛ" --document-number "001" --scanner-profile "EPSON DS-790WN" --confirm-real-scan',
         "```",
         "",
         "Пример фиксации результата:",
@@ -596,6 +599,7 @@ def request_scan(args: argparse.Namespace) -> None:
         "task_id": args.task_id,
         "doc_type": args.doc_type,
         "document_number": args.document_number,
+        "scanner_profile": args.scanner_profile,
         "idempotency_key": args.idempotency_key,
     }
     if payload["idempotency_key"] is None:
@@ -839,6 +843,7 @@ def build_parser() -> argparse.ArgumentParser:
     request.add_argument("--task-id", required=True)
     request.add_argument("--doc-type", required=True)
     request.add_argument("--document-number", required=True)
+    request.add_argument("--scanner-profile", required=True)
     request.add_argument("--idempotency-key")
     request.add_argument("--url")
     request.add_argument("--timeout", type=float, default=360.0)

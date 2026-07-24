@@ -74,8 +74,10 @@ failed/interrupted/timeout → разрешить новую попытку
 `task_id`, `doc_type` и `document_number`. Поэтому повтор того же запроса не
 запускает второй физический скан.
 
-Один `idempotency_key` связан с fingerprint `task_id`, `doc_type` и
-`document_number`. Серверное время начала сканирования в fingerprint не входит.
+Один `idempotency_key` связан с fingerprint `task_id`, `doc_type`,
+`document_number` и `scanner_profile`. Серверное время начала сканирования в
+fingerprint не входит. Повтор с другим профилем отклоняется с 409, поэтому
+случайная смена физического сканера не маскируется идемпотентным replay.
 Повтор того же ключа с другими параметрами отклоняется. Пути из JSON принимаются только
 внутри настроенных incoming/archive каталогов; PDF повторно проходит строгую
 проверку перед replay или retry storage.

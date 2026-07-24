@@ -119,7 +119,7 @@ C:\ProgramData\Aerotech Docflow\data\idempotency
 | `failed`/`interrupted`/`timeout` | Операция завершилась ошибкой | возможна новая попытка по правилам записи |
 
 Ключ связан с fingerprint реквизитов. Один ключ с другими `task_id`, типом,
-датой или номером получает `idempotency_key_request_conflict`.
+номером или `scanner_profile` получает `idempotency_key_request_conflict`.
 
 ## Авария после публикации
 

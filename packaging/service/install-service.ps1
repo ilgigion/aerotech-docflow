@@ -1,5 +1,5 @@
 param(
-    [string]$InstallDir = "$env:ProgramFiles\Aerotech Docflow",
+    [string]$InstallDir = "",
     [string]$ConfigPath = "$env:ProgramData\Aerotech Docflow\config\config.toml",
     [ValidateSet("Prompt", "LocalService", "NetworkService", "LocalSystem")]
     [string]$ServiceAccountMode = "Prompt",
@@ -7,6 +7,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path (Split-Path -Parent $PSScriptRoot) "common_paths.ps1")
+if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+    $InstallDir = Get-CanonicalDocflowInstallDirectory
+}
+$InstallDir = Assert-CanonicalDocflowInstallDirectory $InstallDir
+Assert-NoLegacyX86DocflowInstallation
 $Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run install-service.ps1 from an elevated PowerShell (Run as Administrator)."

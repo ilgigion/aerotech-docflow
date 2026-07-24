@@ -239,6 +239,9 @@ dist\AerotechDocflow\
   docs\
     INSTALLATION.md
   build-manifest.json
+  common_paths.ps1
+  update.ps1
+  update-helper.ps1
 ```
 
 Build-скрипт:
@@ -248,6 +251,8 @@ Build-скрипт:
 - добавляет WinSW под именем `docflow-service.exe`;
 - сохраняет SHA-256 WinSW;
 - формирует `build-manifest.json` с размером и SHA-256 каждого файла;
+- создаёт `dist\dist.zip` и `dist\dist.zip.sha256` для GitHub Release;
+- добавляет автономный загрузчик обновления и rollback-helper;
 - добавляет конфиг-пример, service scripts и этот документ.
 
 Если `-WinSWPath` не передан, EXE всё равно собирается, но установить службу

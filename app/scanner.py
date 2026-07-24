@@ -12,9 +12,28 @@ import secrets
 import shutil
 import subprocess
 import time
+import unicodedata
 
 
 logger = logging.getLogger(__name__)
+MAX_SCANNER_PROFILE_LENGTH = 200
+
+
+def validate_scanner_profile_name(value: str) -> str:
+    """Return a safe, exact NAPS2 profile name."""
+
+    if not isinstance(value, str):
+        raise ValueError("scanner_profile must be a string")
+    profile_name = value.strip()
+    if not profile_name:
+        raise ValueError("scanner_profile must not be blank")
+    if len(profile_name) > MAX_SCANNER_PROFILE_LENGTH:
+        raise ValueError(
+            f"scanner_profile must contain at most {MAX_SCANNER_PROFILE_LENGTH} characters"
+        )
+    if any(unicodedata.category(character).startswith("C") for character in profile_name):
+        raise ValueError("scanner_profile contains control or formatting characters")
+    return profile_name
 
 
 @dataclass(frozen=True)

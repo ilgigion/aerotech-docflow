@@ -143,6 +143,7 @@ $body = @{
     task_id = "INSTALL-TEST-001"
     doc_type = "НКЛ"
     document_number = "INSTALL-001"
+    scanner_profile = "EPSON DS-790WN"
     idempotency_key = "install_test_001"
 } | ConvertTo-Json
 

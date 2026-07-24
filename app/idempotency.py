@@ -124,6 +124,7 @@ class IdempotencyRecord:
     document_datetime: str
     document_number: str
     expected_file_name: str
+    scanner_profile: str = ""
     request_fingerprint: str = ""
     temp_scan_path: str | None = None
     final_file_name: str | None = None
@@ -148,6 +149,7 @@ class IdempotencyRecord:
             "document_datetime": self.document_datetime,
             "document_number": self.document_number,
             "expected_file_name": self.expected_file_name,
+            "scanner_profile": self.scanner_profile,
             "request_fingerprint": self.request_fingerprint,
             "temp_scan_path": self.temp_scan_path,
             "final_file_name": self.final_file_name,
@@ -176,6 +178,7 @@ class IdempotencyRecord:
             document_datetime=str(data.get("document_datetime", "")),
             document_number=str(data.get("document_number", "")),
             expected_file_name=str(data.get("expected_file_name", "")),
+            scanner_profile=str(data.get("scanner_profile", "")),
             request_fingerprint=str(data.get("request_fingerprint", "")),
             temp_scan_path=_optional_str(data.get("temp_scan_path")),
             final_file_name=_optional_str(data.get("final_file_name")),
@@ -278,6 +281,7 @@ def build_request_fingerprint(
     task_id: int | str,
     doc_type: str,
     document_number: str,
+    scanner_profile: str = "",
 ) -> str:
     """Строит стабильный fingerprint бизнес-параметров операции."""
 
@@ -295,6 +299,9 @@ def build_request_fingerprint(
         "doc_type": normalized_doc_type,
         "document_number": normalized_document_number,
     }
+    normalized_scanner_profile = str(scanner_profile).strip()
+    if normalized_scanner_profile:
+        canonical["scanner_profile"] = normalized_scanner_profile
     if raw_doc_type != normalized_doc_type:
         canonical["doc_type_raw"] = raw_doc_type
     if raw_document_number != normalized_document_number:
@@ -451,6 +458,7 @@ def _new_processing_record(
     task_id: str,
     doc_type: str,
     document_number: str,
+    scanner_profile: str,
     request_fingerprint: str,
     attempt: int = 1,
 ) -> IdempotencyRecord:
@@ -466,6 +474,7 @@ def _new_processing_record(
         document_datetime="",
         document_number=str(document_number),
         expected_file_name="",
+        scanner_profile=str(scanner_profile),
         request_fingerprint=request_fingerprint,
         attempt=attempt,
         pid=os.getpid(),
@@ -491,6 +500,7 @@ def begin_idempotent_operation(
     task_id: int | str,
     doc_type: str,
     document_number: str,
+    scanner_profile: str = "",
     settings: IdempotencySettings,
     incoming_dir: Path | str | None = None,
     archive_root: Path | str | None = None,
@@ -515,6 +525,7 @@ def begin_idempotent_operation(
         task_id=task_id,
         doc_type=doc_type,
         document_number=document_number,
+        scanner_profile=scanner_profile,
     )
 
     new_record = _new_processing_record(
@@ -523,6 +534,7 @@ def begin_idempotent_operation(
         task_id=str(task_id),
         doc_type=doc_type,
         document_number=document_number,
+        scanner_profile=scanner_profile,
         request_fingerprint=request_fingerprint,
     )
 
@@ -547,6 +559,7 @@ def begin_idempotent_operation(
                 task_id=task_id,
                 doc_type=doc_type,
                 document_number=document_number,
+                scanner_profile=scanner_profile,
                 settings=settings,
                 incoming_dir=incoming_dir,
                 archive_root=archive_root,
@@ -556,10 +569,15 @@ def begin_idempotent_operation(
     # Planfix document_datetime in the fingerprint; accepting the recalculated
     # value keeps their succeeded/recovery records usable after this upgrade.
     try:
+        # Records from older releases did not persist the selected profile.
+        # They can be migrated to the requested profile because a succeeded or
+        # already-scanned operation will not physically invoke NAPS2 again.
+        existing_profile = existing.scanner_profile.strip() or scanner_profile.strip()
         existing_fingerprint = build_request_fingerprint(
             task_id=existing.task_id,
             doc_type=existing.doc_type,
             document_number=existing.document_number,
+            scanner_profile=existing_profile,
         )
     except Exception as exc:
         raise IdempotencyRecordError(
@@ -584,8 +602,15 @@ def begin_idempotent_operation(
             record=existing.to_dict(),
         )
 
-    if existing.request_fingerprint != existing_fingerprint:
-        existing = replace(existing, request_fingerprint=existing_fingerprint)
+    if (
+        existing.request_fingerprint != existing_fingerprint
+        or existing.scanner_profile != existing_profile
+    ):
+        existing = replace(
+            existing,
+            scanner_profile=existing_profile,
+            request_fingerprint=existing_fingerprint,
+        )
         write_record(record_path, existing)
 
     _ensure_recorded_path_within(
@@ -664,6 +689,7 @@ def begin_idempotent_operation(
             task_id=str(task_id),
             doc_type=doc_type,
             document_number=document_number,
+            scanner_profile=scanner_profile,
             request_fingerprint=request_fingerprint,
             attempt=existing.attempt + 1,
         )
@@ -700,6 +726,7 @@ def begin_idempotent_operation(
             task_id=str(task_id),
             doc_type=doc_type,
             document_number=document_number,
+            scanner_profile=scanner_profile,
             request_fingerprint=request_fingerprint,
             attempt=existing.attempt + 1,
         )
@@ -713,6 +740,7 @@ def begin_idempotent_operation(
         task_id=str(task_id),
         doc_type=doc_type,
         document_number=document_number,
+        scanner_profile=scanner_profile,
         request_fingerprint=request_fingerprint,
         attempt=existing.attempt + 1,
     )

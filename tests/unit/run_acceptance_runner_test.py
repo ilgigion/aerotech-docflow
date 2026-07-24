@@ -47,5 +47,7 @@ with TemporaryDirectory() as temp_dir:
     assert "Type SCAN to start" in text
     assert 'if ($confirmation -ieq "SCAN")' in text
     assert "[int]$StartAt = 1" in text
+    assert "[string]$ScannerProfile" in text
+    assert "--scanner-profile $ScannerProfile" in text
 
 print("OK: acceptance runner ignores proxies and generates guarded series script")

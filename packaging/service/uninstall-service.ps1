@@ -1,8 +1,13 @@
 param(
-    [string]$InstallDir = "$env:ProgramFiles\Aerotech Docflow"
+    [string]$InstallDir = ""
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path (Split-Path -Parent $PSScriptRoot) "common_paths.ps1")
+if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+    $InstallDir = Get-CanonicalDocflowInstallDirectory
+}
+$InstallDir = Assert-CanonicalDocflowInstallDirectory $InstallDir
 $Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run uninstall-service.ps1 from an elevated PowerShell (Run as Administrator)."

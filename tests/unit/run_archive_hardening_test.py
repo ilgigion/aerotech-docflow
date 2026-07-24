@@ -54,6 +54,7 @@ try:
             task_id="T1",
             doc_type="НКЛ",
             document_number="A/B",
+            scanner_profile="UNIT PROFILE",
         )
     )
     raise AssertionError("Lossy document identity must be rejected")

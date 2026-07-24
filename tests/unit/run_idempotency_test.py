@@ -26,6 +26,7 @@ with tempfile.TemporaryDirectory() as tmp:
         task_id="TASK1",
         doc_type="УПД",
         document_number="2455B",
+        scanner_profile="EPSON A",
         settings=settings,
     )
     assert decision1.mode == "run_new_scan"
@@ -60,6 +61,7 @@ with tempfile.TemporaryDirectory() as tmp:
     record = replace(
         record,
         document_datetime="2026-07-10T10:10:25",
+        scanner_profile="",
         request_fingerprint=legacy_fingerprint,
     )
     write_record(decision1.record_path, record)
@@ -70,6 +72,7 @@ with tempfile.TemporaryDirectory() as tmp:
         task_id="TASK1",
         doc_type="УПД",
         document_number="2455B",
+        scanner_profile="EPSON A",
         settings=settings,
     )
     assert decision2.mode == "return_existing"
@@ -79,7 +82,23 @@ with tempfile.TemporaryDirectory() as tmp:
         task_id="TASK1",
         doc_type="УПД",
         document_number="2455B",
+        scanner_profile="EPSON A",
     )
+    assert migrated.scanner_profile == "EPSON A"
+
+    try:
+        begin_idempotent_operation(
+            idempotency_key=key,
+            operation_id="OP-PROFILE-CONFLICT",
+            task_id="TASK1",
+            doc_type="УПД",
+            document_number="2455B",
+            scanner_profile="EPSON B",
+            settings=settings,
+        )
+        raise AssertionError("Expected IdempotencyConflictError for another scanner profile")
+    except IdempotencyConflictError as exc:
+        assert exc.code == "idempotency_key_request_conflict"
 
     try:
         begin_idempotent_operation(
@@ -88,6 +107,7 @@ with tempfile.TemporaryDirectory() as tmp:
             task_id="TASK1",
             doc_type="УПД",
             document_number="DIFFERENT",
+            scanner_profile="EPSON A",
             settings=settings,
         )
         raise AssertionError("Expected IdempotencyConflictError")

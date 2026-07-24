@@ -1,11 +1,12 @@
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "common_paths.ps1")
 
 $Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "Run this script from PowerShell opened with Run as administrator."
 }
 
-$InstallDir = Join-Path $env:ProgramFiles "Aerotech Docflow"
+$InstallDir = Get-CanonicalDocflowInstallDirectory
 $DataRoot = Join-Path $env:ProgramData "Aerotech Docflow"
 $ServiceName = "AerotechDocflow"
 

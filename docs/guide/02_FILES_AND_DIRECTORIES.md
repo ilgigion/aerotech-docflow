@@ -46,9 +46,12 @@ C:\Program Files\Aerotech Docflow\
     docflow-service.xml.template
   docs\
   build-manifest.json
+  common_paths.ps1
   cleanup_previous_install.ps1
   install_current_machine.ps1
   start-manually.ps1
+  update.ps1
+  update-helper.ps1
 
 C:\ProgramData\Aerotech Docflow\
   config\

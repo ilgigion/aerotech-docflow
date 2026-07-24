@@ -236,30 +236,67 @@ stable_interval_seconds = 0.2
     cleanup = (project_root / "packaging" / "cleanup_previous_install.ps1").read_text(
         encoding="utf-8"
     )
-    updater = (project_root / "packaging" / "update_current_machine.ps1").read_text(
+    updater = (project_root / "packaging" / "update.ps1").read_text(
+        encoding="utf-8"
+    )
+    update_helper = (project_root / "packaging" / "update-helper.ps1").read_text(
         encoding="utf-8"
     )
     build_script = (project_root / "packaging" / "build_windows.ps1").read_text(
         encoding="utf-8"
     )
+    common_paths = (project_root / "packaging" / "common_paths.ps1").read_text(
+        encoding="utf-8"
+    )
+    packaging_scripts = [
+        project_root / "packaging" / "install_current_machine.ps1",
+        project_root / "packaging" / "cleanup_previous_install.ps1",
+        project_root / "packaging" / "start-manually.ps1",
+        project_root / "packaging" / "update.ps1",
+        project_root / "packaging" / "update-helper.ps1",
+        project_root / "packaging" / "service" / "install-service.ps1",
+        project_root / "packaging" / "service" / "uninstall-service.ps1",
+    ]
     assert '"D:\\Archive"' not in installer
     assert '"D:\\incoming"' not in installer
     assert "aerotech-primary-archive" not in installer
     assert "effective_environment" in installer
     assert "show-config --ascii" in installer
     assert "Remove-Item -LiteralPath $Marker" not in cleanup
-    assert "Assert-NoScannerActivity $ScannerLock" in updater
-    assert updater.count("Assert-NoScannerActivity $ScannerLock") == 2
-    assert "Stop-InstalledApplication $ResolvedInstall" in updater
-    assert "Assert-PackageManifest $ResolvedSource" in updater
-    assert "Get-FileHash -LiteralPath $ConfigBackup -Algorithm SHA256" in updater
-    assert "Move-Item -LiteralPath $ResolvedInstall -Destination $RollbackDir" in updater
-    assert "Move-Item -LiteralPath $RollbackDir -Destination $ResolvedInstall" in updater
-    assert "--config $ResolvedConfig preflight" in updater
-    assert "docflow-service.xml" in updater
-    assert "Start-Service" not in updater
-    assert "Remove-Item -LiteralPath $ResolvedInstall" not in updater
-    assert '"packaging\\update_current_machine.ps1"' in build_script
+    assert "Invoke-WebRequest" in updater
+    assert "AerotechDocflow-update-" in updater
+    assert "Expand-ZipSafely" in updater
+    assert "Assert-DocflowPackageManifest $PackageRoot" in updater
+    assert "Start-Process" in updater and "-ParentProcessId" in updater
+    assert "helper.ready" in updater and "helper.ready" in update_helper
+    assert "Run the installed updater only from" in updater
+    assert update_helper.count("Assert-NoScannerActivity $ScannerLock") == 2
+    assert update_helper.index("Assert-NoScannerActivity $ScannerLock") < update_helper.index(
+        "$ShutdownStarted = $true"
+    ) < update_helper.index("Stop-InstalledRuntime $InstallDir")
+    assert "Stop-InstalledRuntime $InstallDir" in update_helper
+    assert '$RollbackDir = "$InstallDir.rollback"' in update_helper
+    assert "Remove-PreviousUpdateDirectories $InstallDir" in update_helper
+    assert "Move-Item -LiteralPath $InstallDir -Destination $RollbackDir" in update_helper
+    assert "Move-Item -LiteralPath $RollbackDir -Destination $InstallDir" in update_helper
+    assert "Start-AndVerifyRuntime $InstallDir $ServiceInstalled" in update_helper
+    assert "Wait-LocalHealth" in update_helper
+    assert "Remove-TemporaryUpdateDirectory" in update_helper
+    assert "docflow-service.xml" in update_helper
+    assert "before-update" not in update_helper
+    assert "Copy-Item -LiteralPath $ConfigPath" not in update_helper
+    assert "Remove-Item -LiteralPath $ConfigPath" not in update_helper
+    assert '"packaging\\update.ps1"' in build_script
+    assert '"packaging\\update-helper.ps1"' in build_script
+    assert '"dist.zip"' in build_script
+    assert not (project_root / "packaging" / "update_current_machine.ps1").exists()
+    assert '"packaging\\common_paths.ps1"' in build_script
+    assert '"ProgramW6432"' in common_paths
+    assert '"ProgramFiles(x86)"' in common_paths
+    assert "Assert-CanonicalDocflowInstallDirectory" in update_helper
+    assert "Assert-NoLegacyX86DocflowInstallation" in updater
+    for script_path in packaging_scripts:
+        assert "$env:ProgramFiles" not in script_path.read_text(encoding="utf-8")
 
     from app.cli import _print_json
 

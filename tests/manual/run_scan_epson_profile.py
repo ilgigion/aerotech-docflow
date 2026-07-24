@@ -23,6 +23,7 @@ parser.add_argument("--config", required=True)
 parser.add_argument("--task-id", required=True)
 parser.add_argument("--doc-type", required=True)
 parser.add_argument("--document-number", required=True)
+parser.add_argument("--scanner-profile")
 parser.add_argument("--idempotency-key")
 args = parser.parse_args()
 
@@ -33,6 +34,7 @@ try:
         task_id=args.task_id,
         doc_type=args.doc_type,
         document_number=args.document_number,
+        scanner_profile=args.scanner_profile,
         idempotency_key=args.idempotency_key,
     )
     print("OK")

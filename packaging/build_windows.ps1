@@ -14,6 +14,8 @@ $PackageApp = Join-Path $Package "app"
 $PackageConfig = Join-Path $Package "config"
 $PackageService = Join-Path $Package "service"
 $PackageDocs = Join-Path $Package "docs"
+$ReleaseZip = Join-Path $DistRoot "dist.zip"
+$ReleaseZipHash = Join-Path $DistRoot "dist.zip.sha256"
 
 Set-Location $ProjectRoot
 
@@ -23,6 +25,11 @@ if ($Clean) {
     }
     if (Test-Path -LiteralPath $Package) {
         Remove-Item -LiteralPath $Package -Recurse -Force
+    }
+    foreach ($ReleaseArtifact in @($ReleaseZip, $ReleaseZipHash)) {
+        if (Test-Path -LiteralPath $ReleaseArtifact) {
+            Remove-Item -LiteralPath $ReleaseArtifact -Force
+        }
     }
 }
 
@@ -55,8 +62,10 @@ Copy-Item -LiteralPath "packaging\service\docflow-service.xml.template" -Destina
 Copy-Item -LiteralPath "packaging\service\install-service.ps1" -Destination $PackageService -Force
 Copy-Item -LiteralPath "packaging\service\uninstall-service.ps1" -Destination $PackageService -Force
 Copy-Item -LiteralPath "packaging\cleanup_previous_install.ps1" -Destination $Package -Force
+Copy-Item -LiteralPath "packaging\common_paths.ps1" -Destination $Package -Force
 Copy-Item -LiteralPath "packaging\install_current_machine.ps1" -Destination $Package -Force
-Copy-Item -LiteralPath "packaging\update_current_machine.ps1" -Destination $Package -Force
+Copy-Item -LiteralPath "packaging\update.ps1" -Destination $Package -Force
+Copy-Item -LiteralPath "packaging\update-helper.ps1" -Destination $Package -Force
 Copy-Item -LiteralPath "packaging\start-manually.ps1" -Destination $Package -Force
 Copy-Item -LiteralPath "docs\10_WINDOWS_INSTALLATION_AND_SERVICE.md" -Destination (Join-Path $PackageDocs "INSTALLATION.md") -Force
 Copy-Item -LiteralPath "docs\11_CLEAN_INSTALLATION.md" -Destination (Join-Path $PackageDocs "START_HERE.md") -Force
@@ -83,5 +92,16 @@ $Files = Get-ChildItem -LiteralPath $Package -Recurse -File | ForEach-Object {
 }
 $Files | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $Package "build-manifest.json") -Encoding UTF8
 
+foreach ($ReleaseArtifact in @($ReleaseZip, $ReleaseZipHash)) {
+    if (Test-Path -LiteralPath $ReleaseArtifact) {
+        Remove-Item -LiteralPath $ReleaseArtifact -Force
+    }
+}
+Compress-Archive -Path (Join-Path $Package "*") -DestinationPath $ReleaseZip -CompressionLevel Optimal
+$ReleaseHash = (Get-FileHash -LiteralPath $ReleaseZip -Algorithm SHA256).Hash
+Set-Content -LiteralPath $ReleaseZipHash -Value "$ReleaseHash  dist.zip" -Encoding ASCII
+
 Write-Host "Package ready: $Package"
+Write-Host "GitHub Release asset: $ReleaseZip"
+Write-Host "SHA-256: $ReleaseZipHash"
 Write-Host "Test: & `"$Package\app\aerotech-docflow.exe`" --config `"$Package\config\config.example.toml`" show-config"

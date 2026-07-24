@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
-$InstallDir = Join-Path $env:ProgramFiles "Aerotech Docflow"
+. (Join-Path $PSScriptRoot "common_paths.ps1")
+$InstallDir = Get-CanonicalDocflowInstallDirectory
 $Config = Join-Path $env:ProgramData "Aerotech Docflow\config\config.toml"
 $Executable = Join-Path $InstallDir "app\aerotech-docflow.exe"
 

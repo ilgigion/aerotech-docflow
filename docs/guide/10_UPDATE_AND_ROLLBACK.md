@@ -1,225 +1,161 @@
-# 10. Обновление, откат и удаление
+# 10. Автономное обновление, откат и удаление
 
-## Автоматизированное безопасное обновление
+## Что входит в релиз
 
-В корне новой сборки находится `update_current_machine.ps1`. Запускайте именно
-скрипт из **нового распакованного пакета**, расположенного вне
-`C:\Program Files\Aerotech Docflow`. Откройте PowerShell от имени администратора:
-
-```powershell
-cd "D:\Updates\AerotechDocflow"
-.\update_current_machine.ps1
-```
-
-По умолчанию скрипт использует:
+Сборка создаёт три результата:
 
 ```text
-установленная программа: C:\Program Files\Aerotech Docflow
-рабочий конфиг:          C:\ProgramData\Aerotech Docflow\config\config.toml
-новая сборка:            папка, из которой запущен скрипт
+dist\AerotechDocflow\   распакованный установочный пакет
+dist\dist.zip           архив для GitHub Release
+dist\dist.zip.sha256    контрольная сумма архива
 ```
 
-Скрипт последовательно:
-
-1. требует права администратора и проверяет SHA-256 файлов новой сборки по
-   `build-manifest.json`;
-2. читает путь `scanner.incoming_dir` только из рабочего конфига;
-3. отказывается продолжать, если запущен NAPS2 или существует `.scanner.lock`;
-4. останавливает службу `AerotechDocflow` и установленный процесс приложения,
-   затем повторяет проверку NAPS2 и lock;
-5. создаёт проверенную SHA-256 backup-копию рабочего `config.toml`;
-6. переименовывает установленную папку в соседнюю rollback-папку с timestamp;
-7. копирует новую сборку в новую чистую папку установки;
-8. для существующей WinSW-службы безопасно сохраняет сгенерированный XML;
-9. выполняет `preflight` новым EXE с прежним рабочим конфигом.
-
-Успешное обновление намеренно **не запускает** ни приложение, ни службу. После
-изучения результата службу можно запустить отдельной командой:
-
-```powershell
-Start-Service AerotechDocflow
-Get-Service AerotechDocflow
-Invoke-RestMethod http://127.0.0.1:8000/health
-```
-
-Если `preflight`, копирование или проверка новой папки завершается ошибкой,
-скрипт автоматически возвращает старую папку на прежнее место. Неудачная новая
-папка сохраняется рядом с суффиксом `.failed-update-TIMESTAMP` для диагностики.
-Старая версия остаётся остановленной и автоматически не запускается.
-
-После успешного обновления сохраняются:
+В установленном пакете находятся:
 
 ```text
-C:\Program Files\Aerotech Docflow.rollback-TIMESTAMP
-C:\ProgramData\Aerotech Docflow\config\config.toml.before-update-TIMESTAMP.bak
+update.ps1              доверенный загрузчик, запускаемый оператором
+update-helper.ps1       helper новой версии
+common_paths.ps1        канонические пути и проверка manifest
+build-manifest.json     размеры и SHA-256 всех файлов пакета
 ```
 
-`C:\ProgramData\Aerotech Docflow` не заменяется и не очищается. Единственное
-добавление в нём — запрошенная backup-копия конфига. Скрипт не копирует и не
-изменяет incoming, idempotency, логи, archive marker и PDF в архиве. Команда
-`preflight` не запускает сканер и не создаёт архивный документ.
+Опубликуйте `dist.zip` как asset с точным именем `dist.zip` в GitHub Release.
+Тег рекомендуется оформлять как `v1.2.3`.
 
-Если используются нестандартные пути установки или конфига:
+## Запуск по версии GitHub Release
+
+Откройте PowerShell от имени администратора:
 
 ```powershell
-.\update_current_machine.ps1 `
-  -InstallDir "C:\Apps\Aerotech Docflow" `
-  -ConfigPath "C:\DocflowData\config\config.toml"
+cd "C:\Program Files\Aerotech Docflow"
+.\update.ps1 -Version "v1.2.3"
 ```
 
-Не удаляйте rollback-папку до проверки `/health` и контрольного скана на
-тестовом архиве. Не удаляйте `.scanner.lock` только ради запуска обновления:
-сначала выполните диагностику и установите, какому процессу он принадлежит.
+Если передать `1.2.3`, загрузчик автоматически использует тег `v1.2.3`.
+Репозиторий релизов зафиксирован в загрузчике:
+`ilgigion/aerotech-docflow`.
 
-## Что обновляется, а что сохраняется
+## Запуск по прямому URL
 
-Обновляется:
+```powershell
+cd "C:\Program Files\Aerotech Docflow"
+.\update.ps1 -Url "https://example.org/releases/dist.zip"
+```
+
+Разрешён только абсолютный HTTPS URL без логина и пароля. Для приватного
+GitHub Release можно заранее определить `GITHUB_TOKEN` в текущем процессе;
+загрузчик передаст его только запросу к `github.com` и не запишет в конфиг.
+
+## Как проходит обновление
+
+`update.ps1`:
+
+1. проверяет права администратора и то, что запущен именно из установленной
+   канонической папки;
+2. создаёт уникальную `%TEMP%\AerotechDocflow-update-GUID`;
+3. скачивает туда `dist.zip`;
+4. безопасно распаковывает ZIP с защитой от абсолютных путей, `..`, симлинков,
+   повторяющихся файлов и чрезмерного размера;
+5. проверяет каждый файл по `build-manifest.json`;
+6. запускает новый `update-helper.ps1` отдельным native PowerShell;
+7. ждёт handshake от helper и только после подтверждения завершается. Если
+   helper не стартовал, загрузчик сам очищает временную папку.
+
+Helper ждёт завершения загрузчика, а затем:
+
+1. использует только `C:\Program Files\Aerotech Docflow`, в том числе если
+   загрузчик запускался из PowerShell x86;
+2. читает рабочий конфиг из
+   `C:\ProgramData\Aerotech Docflow\config\config.toml`;
+3. до остановки отказывается продолжать при NAPS2 или `.scanner.lock`;
+4. останавливает службу или вручную запущенное приложение и повторяет проверку;
+5. удаляет прежний `.rollback`, а также rollback/failed-update каталоги старого
+   механизма с валидным timestamp, если они остались;
+6. переименовывает текущую установку в единственный временный `.rollback`;
+7. копирует новый проверенный пакет в каноническую папку;
+8. сохраняет проверенный WinSW XML зарегистрированной службы;
+9. выполняет `preflight`, запускает службу/приложение и проверяет локальный
+   `GET /health` без системного proxy;
+10. после успеха удаляет `.rollback` и уникальную временную папку.
+
+После успеха остаётся только:
 
 ```text
 C:\Program Files\Aerotech Docflow
 ```
 
-Сохраняется:
+История старых версий не хранится.
+
+## Автоматический откат
+
+Если копирование, manifest, `preflight`, запуск или `/health` завершаются
+ошибкой, helper:
+
+1. останавливает новую версию;
+2. удаляет новую каноническую папку;
+3. возвращает `.rollback` на место;
+4. запускает старую версию;
+5. проверяет её `/health`;
+6. удаляет временную папку.
+
+После успешного автоматического отката также остаётся одна рабочая папка без
+истории. Если сам откат не удался из-за блокировки файлов, отказа диска или прав,
+helper выдаёт критическую ошибку. До ручного восстановления отправлять запросы
+на сканирование запрещено.
+
+Отказ из-за уже активного NAPS2 или `.scanner.lock` происходит **до остановки**
+службы. Текущий скан в этом случае не прерывается.
+
+## Что обновление не изменяет
+
+Механизм не копирует, не удаляет и не заменяет:
 
 ```text
-C:\ProgramData\Aerotech Docflow\config\config.toml
-C:\ProgramData\Aerotech Docflow\logs
-C:\ProgramData\Aerotech Docflow\data\idempotency
-D:\incoming
-D:\Archive
+C:\ProgramData\Aerotech Docflow
+рабочий config.toml
+incoming
+idempotency
+логи
+корень архива
+archive marker
+существующие PDF
 ```
 
-Конфиг может потребовать миграции, если новая версия добавляет обязательные
-ключи. Никогда не заменяйте рабочий TOML новым `config.example.toml`.
+`preflight` читает и валидирует конфигурацию, но не запускает NAPS2 и не создаёт
+архивный PDF.
 
-## Сборка новой версии
+## Канонический путь и Program Files (x86)
+
+На 64-битной Windows native Program Files определяется через `ProgramW6432`.
+Путь `Program Files (x86)` никогда не принимается. Непустая старая установка в
+`Program Files (x86)` блокирует автоматическое обновление, чтобы на компьютере
+не существовали две версии.
+
+## Подготовка релиза
 
 На компьютере разработчика:
 
 ```powershell
-cd "D:\PROG_PROJECTS\aerotech-docflow"
-py -m venv .venv-build
-.\.venv-build\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements-build.txt
-```
-
-Обновите номер `application.version` в production-шаблоне и соберите:
-
-```powershell
 .\packaging\build_windows.ps1 `
   -Python ".\.venv-build\Scripts\python.exe" `
-  -WinSWPath "C:\путь\к\WinSW-x64.exe" `
+  -WinSWPath "C:\Tools\WinSW-x64.exe" `
   -Clean
 ```
 
-Результат:
-
-```text
-dist\AerotechDocflow
-```
-
-Build script создаёт пакет с нуля, поэтому старая DLL или WinSW не переживает
-сборку незаметно. `build-manifest.json` содержит размер и SHA-256 каждого файла.
-
-## Проверка до обновления
-
-1. выполните unit-тесты;
-2. проверьте manifest;
-3. запустите новый EXE с копией production-конфига;
-4. выполните `show-config` и `preflight`;
-5. проведите приёмку на тестовом архиве;
-6. сохраните Git commit и отчёт.
-
-Новый EXE можно проверить без установки:
+Перед публикацией проверьте SHA-256:
 
 ```powershell
-& "D:\PROG_PROJECTS\aerotech-docflow\dist\AerotechDocflow\app\aerotech-docflow.exe" `
-  --config "C:\ProgramData\Aerotech Docflow\config\config.toml" `
-  preflight
+Get-FileHash .\dist\dist.zip -Algorithm SHA256
+Get-Content .\dist\dist.zip.sha256
 ```
 
-Preflight не запускает сканер.
-
-## Безопасное обновление ручной установки
-
-Откройте PowerShell от администратора. Сначала остановите сервер `Ctrl+C` и
-проверьте:
-
-```powershell
-Get-Process aerotech-docflow,NAPS2* -ErrorAction SilentlyContinue
-Test-Path "D:\incoming\.scanner.lock"
-```
-
-Если есть активный процесс или lock, сначала завершите диагностику.
-
-Создайте резервные копии:
-
-```powershell
-$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$installed = "C:\Program Files\Aerotech Docflow"
-$rollback = "C:\Program Files\Aerotech Docflow.rollback.$stamp"
-
-Copy-Item `
-  "C:\ProgramData\Aerotech Docflow\config\config.toml" `
-  "C:\ProgramData\Aerotech Docflow\config\config.toml.$stamp.backup"
-
-Move-Item $installed $rollback
-```
-
-Копируйте новый пакет как целый каталог, а не поверх старого `_internal`:
-
-```powershell
-Copy-Item `
-  "D:\PROG_PROJECTS\aerotech-docflow\dist\AerotechDocflow" `
-  $installed `
-  -Recurse
-```
-
-Проверьте:
-
-```powershell
-& "$installed\app\aerotech-docflow.exe" `
-  --config "C:\ProgramData\Aerotech Docflow\config\config.toml" `
-  preflight
-```
-
-После preflight запустите вручную и проверьте `/health`, затем один тестовый
-скан. Удалять rollback-каталог можно только после приёмки.
-
-## Откат
-
-Остановите новый процесс. Затем из elevated PowerShell:
-
-```powershell
-Rename-Item `
-  "C:\Program Files\Aerotech Docflow" `
-  "Aerotech Docflow.failed-update"
-
-Rename-Item `
-  "C:\Program Files\Aerotech Docflow.rollback.YYYYMMDD_HHMMSS" `
-  "Aerotech Docflow"
-```
-
-Если формат конфига менялся, восстановите совместимую backup-копию. Выполните
-preflight старым EXE, затем запустите его. Не меняйте архив и idempotency без
-отдельного плана миграции.
-
-## Обновление Windows-службы
-
-1. остановить службу;
-2. убедиться в отсутствии дочернего EXE/NAPS2/lock;
-3. сохранить XML и ProgramData;
-4. заменить целиком `Program Files`;
-5. проверить, что WinSW и XML имеют базовое имя `docflow-service`;
-6. preflight новым EXE;
-7. запустить службу;
-8. проверить status, `/health` и service logs.
+GitHub HTTPS и manifest защищают передачу от случайной порчи, но manifest внутри
+ZIP не является цифровой подписью издателя. Для защиты от компрометации GitHub
+следующим уровнем должна быть Authenticode-подпись EXE и PowerShell-скриптов.
 
 ## Полное удаление
 
-`cleanup_previous_install.ps1` удаляет службу, Program Files и ProgramData. Он
-не читает, не изменяет и не удаляет корни архивов, PDF или archive marker.
-
-Перед удалением сохраните config, idempotency и logs, если они нужны для аудита.
-Не удаляйте `D:\Archive` вместе с приложением.
+`cleanup_previous_install.ps1` удаляет зарегистрированную службу, каноническую
+папку приложения и `C:\ProgramData\Aerotech Docflow`. Корни архивов, PDF и
+archive marker он не удаляет. Перед полной очисткой сохраните config, логи и
+данные idempotency, если они нужны для аудита.

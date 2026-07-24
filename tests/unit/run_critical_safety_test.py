@@ -14,10 +14,12 @@ from app.scanner import (
     ScannerOutputInvalidError,
     ScannerProcessStillRunningError,
     ScannerSettings,
+    build_naps2_command,
     classify_naps2_error,
     kill_process_tree,
     run_naps2,
     validate_pdf_output,
+    validate_scanner_profile_name,
 )
 from app.storage import FileMoveError, finalize_atomic_move
 
@@ -31,6 +33,18 @@ def write_valid_pdf(path: Path) -> None:
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
+
+    profile_settings = ScannerSettings(
+        naps2_executable=Path("NAPS2.Console.exe"),
+        profile_name=validate_scanner_profile_name("Домашний сканер"),
+    )
+    assert build_naps2_command(profile_settings, root / "profile.pdf") == [
+        "NAPS2.Console.exe",
+        "-o",
+        str(root / "profile.pdf"),
+        "-p",
+        "Домашний сканер",
+    ]
 
     existing = root / "existing.pdf"
     temp = root / "existing.tmp"

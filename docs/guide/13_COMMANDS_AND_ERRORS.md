@@ -53,6 +53,8 @@ Get-ChildItem "D:\Archive" -Recurse -File |
 $body = @{
     task_id = "53243"
     doc_type = "НКЛ"
+    document_number = "001"
+    scanner_profile = "EPSON DS-790WN"
 } | ConvertTo-Json
 ```
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -35,6 +35,7 @@ from app.scanner import (
     ScannerSettings,
     load_settings_from_env,
     scan_document,
+    validate_scanner_profile_name,
     validate_pdf_output,
 )
 from app.storage import (
@@ -117,11 +118,17 @@ def build_operation_id() -> str:
 
 def get_effective_scanner_settings(
     scanner_settings: ScannerSettings | None,
+    scanner_profile: str | None = None,
 ) -> ScannerSettings:
-    if scanner_settings is not None:
-        return scanner_settings
+    settings = scanner_settings if scanner_settings is not None else load_settings_from_env()
 
-    return load_settings_from_env()
+    if scanner_profile is None:
+        return settings
+
+    return replace(
+        settings,
+        profile_name=validate_scanner_profile_name(scanner_profile),
+    )
 
 
 def get_effective_storage_settings(
@@ -496,6 +503,7 @@ def process_document_scan(
     doc_type: str,
     document_number: str,
     *,
+    scanner_profile: str | None = None,
     scanner_settings: ScannerSettings | None = None,
     storage_settings: StorageSettings | None = None,
     lock_settings: ScannerLockSettings | None = None,
@@ -522,7 +530,10 @@ def process_document_scan(
     task_id_str = str(task_id).strip()
     operation_id = operation_id or build_operation_id()
 
-    effective_scanner_settings = get_effective_scanner_settings(scanner_settings)
+    effective_scanner_settings = get_effective_scanner_settings(
+        scanner_settings,
+        scanner_profile,
+    )
     effective_storage_settings = get_effective_storage_settings(storage_settings)
     effective_idempotency_settings = get_effective_idempotency_settings(
         idempotency_settings,
@@ -542,9 +553,10 @@ def process_document_scan(
     )
 
     logger.info(
-        "Document scan process started: operation_id=%s task_id=%s lock_path=%s idempotency_key=%s",
+        "Document scan process started: operation_id=%s task_id=%s scanner_profile=%s lock_path=%s idempotency_key=%s",
         operation_id,
         task_id_str,
+        effective_scanner_settings.profile_name,
         lock_path,
         idempotency_key,
     )
@@ -555,6 +567,7 @@ def process_document_scan(
         task_id=task_id_str,
         doc_type=doc_type,
         document_number=document_number,
+        scanner_profile=effective_scanner_settings.profile_name or "",
         settings=effective_idempotency_settings,
         incoming_dir=effective_scanner_settings.incoming_dir,
         archive_root=effective_storage_settings.archive_root,
@@ -870,6 +883,7 @@ def process_document_scan_safe(
     doc_type: str,
     document_number: str,
     *,
+    scanner_profile: str | None = None,
     scanner_settings: ScannerSettings | None = None,
     storage_settings: StorageSettings | None = None,
     lock_settings: ScannerLockSettings | None = None,
@@ -892,6 +906,7 @@ def process_document_scan_safe(
             task_id=task_id,
             doc_type=doc_type,
             document_number=document_number,
+            scanner_profile=scanner_profile,
             scanner_settings=scanner_settings,
             storage_settings=storage_settings,
             lock_settings=lock_settings,

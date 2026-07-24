@@ -25,11 +25,13 @@ with TemporaryDirectory() as temp_dir:
     records = root / "idempotency"
     incoming.mkdir()
     scan_calls = 0
+    used_profiles: list[str | None] = []
 
     def fake_scan_document(*, task_id, settings, operation_id, on_scan_start):
         del task_id, operation_id
         global scan_calls
         scan_calls += 1
+        used_profiles.append(settings.profile_name)
         on_scan_start()
         output = settings.incoming_dir / "PF_SERVER_TIME_TEST.pdf"
         writer = PdfWriter()
@@ -47,6 +49,7 @@ with TemporaryDirectory() as temp_dir:
             "task_id": "SERVER-TIME-1",
             "doc_type": "НКЛ",
             "document_number": "001",
+            "scanner_profile": "UNIT TEST PROFILE",
             "scanner_settings": ScannerSettings(incoming_dir=incoming),
             "storage_settings": StorageSettings(archive_root=archive),
             "use_lock": False,
@@ -65,6 +68,7 @@ with TemporaryDirectory() as temp_dir:
     assert second.file_name == first.file_name
     assert second.idempotent_replay is True
     assert scan_calls == 1
+    assert used_profiles == ["UNIT TEST PROFILE"]
 
     record = read_record(build_record_path(records, "server-time-test-1"))
     assert record is not None

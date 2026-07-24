@@ -200,6 +200,7 @@ run          запустить FastAPI
 | `SERVICE_XML_MISSING` | Не найден рабочий `service\docflow-service.xml`; переключение не начинается |
 | `SERVICE_XML_CHANGED` | Рабочий WinSW XML изменился между проверкой и переключением |
 | `SERVICE_XML_COPY_MISMATCH` | Сохранённый WinSW XML не прошёл проверку SHA-256 |
+| `SERVICE_START_FAILED` | `sc.exe` отклонил запуск или служба сразу вернулась в `STOPPED`; смотреть диагностический snapshot перед rollback |
 | `POST_INSTALL_HEALTH_FAILED` | Новая служба не подтвердила версию и состояние |
 | `ROLLBACK_FAILED` | Не удалось автоматически вернуть старую службу |
 | `LEGACY_VERSION_UNKNOWN` | Setup не смог однозначно определить старую версию |

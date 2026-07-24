@@ -70,14 +70,29 @@ with tempfile.TemporaryDirectory() as temp:
     config_before = paths.config_path.read_bytes()
     service_xml_before = (paths.install_dir / "service" / "docflow-service.xml").read_bytes()
     idle_checks: list[Path] = []
+    progress_events: list[tuple[int, int, str]] = []
+    detail_events: list[str] = []
     with (
         patch("updater.transaction.assert_scanner_idle", side_effect=lambda path: idle_checks.append(path)),
         patch("updater.transaction.stop_service"),
         patch("updater.transaction.start_service"),
         patch("updater.transaction.assert_docflow_process_stopped"),
         patch("updater.transaction.wait_health"),
+        patch(
+            "updater.transaction.collect_service_diagnostics",
+            return_value={
+                "wrapper_path": "wrapper",
+                "xml_path": "xml",
+                "service_state": "RUNNING",
+                "relevant_processes": [{"name": "aerotech-docflow.exe", "pid": "123"}],
+            },
+        ),
     ):
-        result = UpdateTransaction(paths, logger).apply(prepared, progress=lambda *_: None)
+        result = UpdateTransaction(paths, logger).apply(
+            prepared,
+            progress=lambda number, total, message: progress_events.append((number, total, message)),
+            detail=detail_events.append,
+        )
     assert result.installed_version == "1.3.0"
     assert len(idle_checks) == 2, "scanner must be checked after confirmation and after service stop"
     assert not paths.rollback_dir.exists()
@@ -88,6 +103,9 @@ with tempfile.TemporaryDirectory() as temp:
     assert b"config\\config.toml" in service_xml_after
     assert b"service-logs" in service_xml_after
     assert paths.config_path.read_bytes() == config_before
+    assert [event[0] for event in progress_events] == list(range(1, 15))
+    assert all(event[1] == 14 for event in progress_events)
+    assert any("WinSW XML" in message for message in detail_events)
 
 with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
@@ -95,7 +113,7 @@ with tempfile.TemporaryDirectory() as temp:
     service_xml_before = (paths.install_dir / "service" / "docflow-service.xml").read_bytes()
     calls = 0
 
-    def health(version: str) -> None:
+    def health(version: str, **_kwargs: object) -> None:
         global calls
         calls += 1
         if version == "1.3.0":

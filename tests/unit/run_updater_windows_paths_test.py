@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 from unittest.mock import patch
 
 from updater.errors import UpdaterError
-from updater.windows import UpdaterPaths, _system_drive_root
+from updater.windows import UpdaterPaths, _system_drive_root, start_service
 
 
 assert _system_drive_root("C:") == Path("C:\\")
@@ -33,5 +34,28 @@ with (
 assert paths.temp_root == Path(r"C:\Temp\Aerotech Docflow")
 assert paths.temp_root.is_absolute()
 assert str(paths.temp_root).startswith("C:\\Temp\\")
+
+messages: list[str] = []
+with (
+    patch("updater.windows.service_state", return_value=1),
+    patch(
+        "updater.windows._run",
+        return_value=subprocess.CompletedProcess(
+            args=["sc.exe"],
+            returncode=5,
+            stdout="service output",
+            stderr="access denied",
+        ),
+    ),
+):
+    try:
+        start_service(report=messages.append)
+    except UpdaterError as exc:
+        assert exc.code == "SERVICE_START_FAILED"
+        assert "exit=5" in exc.message
+        assert "access denied" in exc.message
+    else:
+        raise AssertionError("non-zero sc.exe result must fail with diagnostics")
+assert any("exit=5" in message for message in messages)
 
 print("UPDATER WINDOWS PATHS UNIT TEST OK")

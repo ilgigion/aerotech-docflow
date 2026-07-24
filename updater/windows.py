@@ -11,8 +11,9 @@ from pathlib import Path
 import re
 import subprocess
 import time
-from typing import Iterator
+from typing import Callable, Iterator
 from urllib.request import ProxyHandler, build_opener
+import xml.etree.ElementTree as ET
 
 from updater.errors import UpdaterError
 
@@ -20,6 +21,28 @@ from updater.errors import UpdaterError
 SERVICE_NAME = "AerotechDocflow"
 MUTEX_NAME = r"Global\AerotechDocflowUpdater"
 HEALTH_URL = "http://127.0.0.1:8000/health"
+SERVICE_STATE_NAMES = {
+    1: "STOPPED",
+    2: "START_PENDING",
+    3: "STOP_PENDING",
+    4: "RUNNING",
+    5: "CONTINUE_PENDING",
+    6: "PAUSE_PENDING",
+    7: "PAUSED",
+}
+
+
+def _service_state_name(value: int | None) -> str:
+    if value is None:
+        return "NOT_INSTALLED"
+    return SERVICE_STATE_NAMES.get(value, f"UNKNOWN({value})")
+
+
+def _compact_process_output(value: str, *, limit: int = 1000) -> str:
+    text = " ".join(value.split())
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
 
 
 def _system_drive_root(value: str) -> Path:
@@ -116,13 +139,29 @@ def _system_executable(name: str) -> str:
     return str(executable)
 
 
-def _run(command: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+def _windows_oem_encoding() -> str:
+    if os.name == "nt":
+        try:
+            code_page = int(ctypes.windll.kernel32.GetOEMCP())
+            if code_page > 0:
+                return f"cp{code_page}"
+        except (AttributeError, OSError, ValueError):
+            pass
+    return "utf-8"
+
+
+def _run(
+    command: list[str],
+    *,
+    timeout: int = 60,
+    encoding: str = "utf-8",
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             command,
             capture_output=True,
             text=True,
-            encoding="utf-8",
+            encoding=encoding,
             errors="replace",
             timeout=timeout,
             check=False,
@@ -196,13 +235,40 @@ def service_state() -> int | None:
         advapi32.CloseServiceHandle(manager)
 
 
-def _wait_service(expected: int, timeout_seconds: int) -> None:
+def _wait_service(
+    expected: int,
+    timeout_seconds: int,
+    *,
+    report: Callable[[str], None] | None = None,
+    fail_if_stopped: bool = False,
+) -> None:
     deadline = time.monotonic() + timeout_seconds
+    attempt = 0
+    stopped_observations = 0
     while time.monotonic() < deadline:
-        if service_state() == expected:
+        attempt += 1
+        state = service_state()
+        if report is not None:
+            report(
+                f"SCM: ожидание {_service_state_name(expected)}, "
+                f"проверка {attempt}, сейчас {_service_state_name(state)}."
+            )
+        if state == expected:
             return
+        if fail_if_stopped and state == 1:
+            stopped_observations += 1
+            if stopped_observations >= 2:
+                raise UpdaterError(
+                    "SERVICE_START_FAILED",
+                    "Служба вернулась в STOPPED сразу после команды запуска.",
+                )
+        else:
+            stopped_observations = 0
         time.sleep(1)
-    raise UpdaterError("SERVICE_TIMEOUT", f"Служба не перешла в состояние {expected} за {timeout_seconds} секунд.")
+    raise UpdaterError(
+        "SERVICE_TIMEOUT",
+        f"Служба не перешла в состояние {_service_state_name(expected)} за {timeout_seconds} секунд.",
+    )
 
 
 def stop_service() -> None:
@@ -214,29 +280,54 @@ def stop_service() -> None:
     if state == 3:
         _wait_service(1, 30)
         return
-    completed = _run([_system_executable("sc.exe"), "stop", SERVICE_NAME])
+    completed = _run(
+        [_system_executable("sc.exe"), "stop", SERVICE_NAME],
+        encoding=_windows_oem_encoding(),
+    )
     if completed.returncode != 0:
         raise UpdaterError("SERVICE_STOP_FAILED", "Не удалось остановить службу AerotechDocflow.")
     _wait_service(1, 30)
 
 
-def start_service() -> None:
+def start_service(*, report: Callable[[str], None] | None = None) -> None:
     state = service_state()
+    if report is not None:
+        report(f"SCM: состояние перед запуском — {_service_state_name(state)}.")
     if state is None:
         raise UpdaterError("SERVICE_NOT_INSTALLED", f"Служба {SERVICE_NAME} не установлена.")
     if state == 4:
+        if report is not None:
+            report("SCM: служба уже находится в RUNNING.")
         return
     if state == 2:
-        _wait_service(4, 30)
+        _wait_service(4, 30, report=report, fail_if_stopped=True)
         return
-    completed = _run([_system_executable("sc.exe"), "start", SERVICE_NAME])
+    completed = _run(
+        [_system_executable("sc.exe"), "start", SERVICE_NAME],
+        encoding=_windows_oem_encoding(),
+    )
+    stdout = _compact_process_output(completed.stdout)
+    stderr = _compact_process_output(completed.stderr)
+    if report is not None:
+        report(
+            f"sc.exe start: exit={completed.returncode}; "
+            f"stdout={stdout or '<empty>'}; stderr={stderr or '<empty>'}."
+        )
     if completed.returncode != 0:
-        raise UpdaterError("SERVICE_START_FAILED", "Не удалось запустить службу AerotechDocflow.")
-    _wait_service(4, 30)
+        raise UpdaterError(
+            "SERVICE_START_FAILED",
+            "Не удалось запустить службу AerotechDocflow: "
+            f"sc.exe exit={completed.returncode}; stdout={stdout or '<empty>'}; "
+            f"stderr={stderr or '<empty>'}.",
+        )
+    _wait_service(4, 30, report=report, fail_if_stopped=True)
 
 
 def process_names() -> list[str]:
-    completed = _run([_system_executable("tasklist.exe"), "/FO", "CSV", "/NH"])
+    completed = _run(
+        [_system_executable("tasklist.exe"), "/FO", "CSV", "/NH"],
+        encoding=_windows_oem_encoding(),
+    )
     if completed.returncode != 0:
         raise UpdaterError("PROCESS_QUERY_FAILED", "Не удалось получить список процессов.")
     names: list[str] = []
@@ -244,6 +335,98 @@ def process_names() -> list[str]:
         if row:
             names.append(row[0])
     return names
+
+
+def collect_service_diagnostics(paths: UpdaterPaths) -> dict[str, object]:
+    wrapper_path = paths.install_dir / "service" / "docflow-service.exe"
+    xml_path = paths.install_dir / "service" / "docflow-service.xml"
+    result: dict[str, object] = {
+        "wrapper_path": str(wrapper_path),
+        "wrapper_exists": wrapper_path.is_file(),
+        "xml_path": str(xml_path),
+        "xml_exists": xml_path.is_file(),
+    }
+    try:
+        result["service_state"] = _service_state_name(service_state())
+    except Exception as exc:
+        result["service_state_error"] = str(exc)
+
+    try:
+        root = ET.parse(xml_path).getroot()
+        result["xml"] = {
+            "id": root.findtext("id"),
+            "executable": root.findtext("executable"),
+            "arguments": root.findtext("arguments"),
+            "workingdirectory": root.findtext("workingdirectory"),
+            "logpath": root.findtext("logpath"),
+        }
+    except Exception as exc:
+        result["xml_error"] = str(exc)
+
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            rf"SYSTEM\CurrentControlSet\Services\{SERVICE_NAME}",
+        ) as key:
+            result["scm"] = {
+                "image_path": winreg.QueryValueEx(key, "ImagePath")[0],
+                "start_name": winreg.QueryValueEx(key, "ObjectName")[0],
+            }
+    except Exception as exc:
+        result["scm_error"] = str(exc)
+
+    try:
+        query = _run(
+            [_system_executable("sc.exe"), "queryex", SERVICE_NAME],
+            encoding=_windows_oem_encoding(),
+        )
+        result["sc_queryex"] = {
+            "exit_code": query.returncode,
+            "stdout": _compact_process_output(query.stdout),
+            "stderr": _compact_process_output(query.stderr),
+        }
+    except Exception as exc:
+        result["sc_queryex_error"] = str(exc)
+
+    try:
+        completed = _run(
+            [_system_executable("tasklist.exe"), "/FO", "CSV", "/NH"],
+            encoding=_windows_oem_encoding(),
+        )
+        processes: list[dict[str, str]] = []
+        for row in csv.reader(completed.stdout.splitlines()):
+            if len(row) >= 2 and row[0].casefold() in {
+                "aerotech-docflow.exe",
+                "docflow-service.exe",
+            }:
+                processes.append({"name": row[0], "pid": row[1]})
+        result["relevant_processes"] = processes
+    except Exception as exc:
+        result["process_query_error"] = str(exc)
+
+    log_dir = paths.program_data_dir / "service-logs"
+    try:
+        logs = sorted(
+            (path for path in log_dir.glob("docflow-service*.log") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if logs:
+            latest = logs[0]
+            with latest.open("rb") as stream:
+                size = latest.stat().st_size
+                stream.seek(max(0, size - 16 * 1024))
+                tail = stream.read().decode("utf-8", errors="replace")
+            result["latest_wrapper_log"] = {
+                "path": str(latest),
+                "tail": tail[-8000:],
+            }
+    except Exception as exc:
+        result["wrapper_log_error"] = str(exc)
+
+    return result
 
 
 def assert_no_naps2() -> None:
@@ -303,10 +486,18 @@ def assert_scanner_idle(incoming: Path) -> None:
         raise UpdaterError("SCANNER_ACTIVE", f"Обнаружен scanner lock: {lock_path}")
 
 
-def wait_health(expected_version: str, *, attempts: int = 10, interval: float = 2.0) -> dict:
+def wait_health(
+    expected_version: str,
+    *,
+    attempts: int = 10,
+    interval: float = 2.0,
+    report: Callable[[str], None] | None = None,
+) -> dict:
     opener = build_opener(ProxyHandler({}))
     last_error = "нет ответа"
-    for _ in range(attempts):
+    for attempt in range(1, attempts + 1):
+        if report is not None:
+            report(f"/health: попытка {attempt}/{attempts}, ожидается версия {expected_version}.")
         try:
             with opener.open(HEALTH_URL, timeout=2) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -316,10 +507,14 @@ def wait_health(expected_version: str, *, attempts: int = 10, interval: float = 
                 and payload.get("service") == "aerotech-docflow"
                 and payload.get("version") == expected_version
             ):
+                if report is not None:
+                    report(f"/health: получен status=ok, version={expected_version}.")
                 return payload
             last_error = f"неожиданный ответ: {payload!r}"
         except Exception as exc:
             last_error = str(exc)
+        if report is not None:
+            report(f"/health пока не готов: {_compact_process_output(last_error, limit=300)}")
         time.sleep(interval)
     raise UpdaterError(
         "POST_INSTALL_HEALTH_FAILED",

@@ -20,6 +20,7 @@ from updater.windows import (
     UpdaterPaths,
     assert_docflow_process_stopped,
     assert_scanner_idle,
+    collect_service_diagnostics,
     incoming_from_config,
     run_preflight,
     service_state,
@@ -177,28 +178,49 @@ class UpdateTransaction:
                 f"Не удалось восстановить незавершённое обновление: {exc}",
             ) from exc
 
-    def prepare(self) -> PreparedUpdate:
+    def prepare(
+        self,
+        *,
+        report: Callable[[str], None] | None = None,
+    ) -> PreparedUpdate:
+        def emit(message: str) -> None:
+            self.logger.info("Preparation detail: %s", message)
+            if report is not None:
+                report(message)
+
+        emit("Чтение version.json установленной версии...")
         installed = read_version_file(self.installed_version_path)
+        emit(f"Установленная версия определена: {installed.version}.")
+        emit("Проверка установленного EXE, рабочего config.toml и WinSW XML...")
         if not self.installed_executable.is_file():
             raise UpdaterError("INSTALLATION_INVALID", f"Приложение не найдено: {self.installed_executable}")
         if not self.paths.config_path.is_file():
             raise UpdaterError("CONFIG_NOT_FOUND", f"Рабочий конфиг не найден: {self.paths.config_path}")
         service_xml = self.paths.install_dir / "service" / "docflow-service.xml"
         service_xml_sha256 = _service_xml_sha256(service_xml)
+        emit(f"Рабочий WinSW XML найден, SHA-256={service_xml_sha256}.")
 
         def report_invalid(path: Path, error: UpdaterError) -> None:
             self.logger.warning("Rejected package=%s code=%s reason=%s", path, error.code, error.message)
 
+        emit(f"Поиск и проверка ZIP в {self.paths.temp_root}...")
         package = select_newest_package(
             self.paths.temp_root,
             installed,
             report_invalid=report_invalid,
         )
+        emit(f"Выбран пакет {package.zip_path.name}; manifest и SHA-256 корректны.")
+        emit(f"Распаковка пакета в {self.paths.unpacked_dir}...")
         extract_package(package, self.paths.unpacked_dir)
         new_executable = self.paths.unpacked_dir / "app" / "aerotech-docflow.exe"
+        emit(f"Запуск preflight нового EXE с рабочим config.toml: {new_executable}")
         run_preflight(new_executable, self.paths.config_path)
+        emit("Preflight новой версии успешно завершён.")
+        emit("Чтение фактического incoming из рабочего config.toml...")
         incoming = incoming_from_config(self.installed_executable, self.paths.config_path)
+        emit(f"Проверка NAPS2 и scanner lock в {incoming}...")
         assert_scanner_idle(incoming)
+        emit("Подготовка завершена; служба пока не остановлена.")
         self.logger.info(
             "Preparation passed old_version=%s new_version=%s package=%s",
             installed.version,
@@ -212,15 +234,67 @@ class UpdateTransaction:
             service_xml_sha256=service_xml_sha256,
         )
 
+    def _record_service_diagnostics(
+        self,
+        stage: str,
+        *,
+        detail: Callable[[str], None] | None = None,
+        error: bool = False,
+    ) -> dict[str, object]:
+        try:
+            diagnostics = collect_service_diagnostics(self.paths)
+        except Exception as exc:
+            self.logger.exception("Failed to collect service diagnostics stage=%s", stage)
+            if detail is not None:
+                detail(f"Диагностика службы недоступна: {exc}")
+            return {"diagnostic_error": str(exc)}
+        message = json.dumps(diagnostics, ensure_ascii=False, sort_keys=True, default=str)
+        if error:
+            self.logger.error("Service diagnostics stage=%s data=%s", stage, message)
+        else:
+            self.logger.info("Service diagnostics stage=%s data=%s", stage, message)
+        if detail is not None:
+            detail(f"WinSW EXE: {diagnostics.get('wrapper_path')}")
+            detail(f"WinSW XML: {diagnostics.get('xml_path')}")
+            scm = diagnostics.get("scm")
+            if isinstance(scm, dict):
+                detail(f"SCM ImagePath: {scm.get('image_path')}")
+                detail(f"SCM StartName: {scm.get('start_name')}")
+            xml = diagnostics.get("xml")
+            if isinstance(xml, dict):
+                detail(f"XML executable: {xml.get('executable')}")
+                detail(f"XML arguments: {xml.get('arguments')}")
+                detail(f"XML workingdirectory: {xml.get('workingdirectory')}")
+                detail(f"XML logpath: {xml.get('logpath')}")
+            detail(f"SCM state: {diagnostics.get('service_state', diagnostics.get('service_state_error'))}")
+            processes = diagnostics.get("relevant_processes")
+            detail(f"Процессы WinSW/Docflow: {processes if processes else 'не обнаружены'}")
+        return diagnostics
+
     def apply(
         self,
         prepared: PreparedUpdate,
         *,
         progress: Callable[[int, int, str], None],
+        detail: Callable[[str], None] | None = None,
     ) -> UpdateResult:
+        total_steps = 14
+
+        def emit(message: str) -> None:
+            self.logger.info("Update detail: %s", message)
+            if detail is not None:
+                detail(message)
+
+        def advance(number: int, message: str) -> None:
+            self.logger.info("Update step=%s/%s message=%s", number, total_steps, message)
+            progress(number, total_steps, message)
+
+        advance(1, "Пакет распакован, manifest и preflight уже проверены.")
+        advance(2, "Повторная проверка NAPS2 и scanner lock после подтверждения...")
         # Required second check: the operator may have started a scan while the
         # updater was waiting for the confirmation key.
         assert_scanner_idle(prepared.incoming)
+        emit("NAPS2 не запущен; scanner lock отсутствует.")
         install = _assert_exact_path(self.paths.install_dir, self.paths.install_dir)
         rollback = _assert_exact_path(self.paths.rollback_dir, self.paths.rollback_dir)
         unpacked = _assert_exact_path(self.paths.unpacked_dir, self.paths.unpacked_dir)
@@ -233,33 +307,45 @@ class UpdateTransaction:
         old_moved = False
         committed = False
         try:
-            progress(1, 6, "Распаковка и проверка завершены.")
-            progress(2, 6, "Остановка службы...")
-            stop_service()
+            advance(3, "Отправка команды остановки Windows-службы...")
             shutdown_started = True
+            stop_service()
+            advance(4, "Проверка остановки aerotech-docflow.exe...")
             assert_docflow_process_stopped()
+            emit("Процесс aerotech-docflow.exe остановлен.")
+            advance(5, "Контрольная проверка сканера и рабочего WinSW XML...")
             assert_scanner_idle(prepared.incoming)
             current_service_xml = install / "service" / "docflow-service.xml"
             if _service_xml_sha256(current_service_xml) != prepared.service_xml_sha256:
                 raise UpdaterError("SERVICE_XML_CHANGED", "Рабочий WinSW XML изменился после подготовки.")
+            emit(f"WinSW XML подтверждён, SHA-256={prepared.service_xml_sha256}.")
 
-            progress(3, 6, "Создание резервной копии...")
+            advance(6, "Перемещение старой установки в rollback...")
             os.replace(install, rollback)
             old_moved = True
+            emit(f"Rollback: {rollback}")
 
-            progress(4, 6, "Установка новой версии...")
+            advance(7, "Перемещение файлов новой версии в Program Files...")
             os.replace(unpacked, install)
+            emit(f"Новая установка: {install}")
+            advance(8, "Восстановление рабочего WinSW XML без изменений...")
             _preserve_service_xml(
                 rollback / "service" / "docflow-service.xml",
                 install / "service" / "docflow-service.xml",
                 prepared.service_xml_sha256,
             )
             self.logger.info("Preserved WinSW service XML sha256=%s", prepared.service_xml_sha256)
+            emit("Рабочий WinSW XML восстановлен и повторно проверен по SHA-256.")
 
-            progress(5, 6, "Запуск службы...")
-            start_service()
-            progress(6, 6, "Проверка работоспособности...")
-            wait_health(str(prepared.package.version.version))
+            advance(9, "Проверка путей WinSW, XML и учётной записи службы...")
+            self._record_service_diagnostics("before-start", detail=detail)
+            advance(10, "Вызов sc.exe start AerotechDocflow...")
+            start_service(report=emit)
+            advance(11, "Windows Service Control Manager подтвердил RUNNING.")
+            advance(12, "Проверка процессов WinSW и aerotech-docflow.exe...")
+            self._record_service_diagnostics("after-start", detail=detail)
+            advance(13, "Ожидание локального /health новой версии...")
+            wait_health(str(prepared.package.version.version), report=emit)
             committed = True
             self.logger.info(
                 "Update committed old_version=%s new_version=%s",
@@ -268,17 +354,25 @@ class UpdateTransaction:
             )
         except Exception as update_error:
             self.logger.exception("Update failed; starting rollback")
+            if old_moved and install.exists():
+                self._record_service_diagnostics("update-failure-before-rollback", detail=detail, error=True)
             if not shutdown_started:
                 raise
             try:
+                emit("Rollback: остановка неуспешной новой службы.")
                 if service_state() not in {None, 1}:
                     stop_service()
                 if old_moved:
+                    emit("Rollback: удаление новой установки и возврат старого каталога.")
                     if install.exists():
                         _remove_managed(install, self.paths.install_dir)
                     os.replace(rollback, install)
-                start_service()
-                wait_health(str(prepared.installed.version))
+                emit("Rollback: запуск предыдущей версии службы.")
+                start_service(report=lambda message: emit(f"Rollback: {message}"))
+                wait_health(
+                    str(prepared.installed.version),
+                    report=lambda message: emit(f"Rollback: {message}"),
+                )
                 self.logger.info("Rollback passed health version=%s", prepared.installed.version)
             except Exception as rollback_error:
                 self.logger.exception("Rollback failed")
@@ -287,6 +381,7 @@ class UpdateTransaction:
 
         cleanup_warning: str | None = None
         if committed:
+            advance(14, "Очистка rollback, ZIP и временных файлов...")
             failures: list[str] = []
             try:
                 _remove_managed(rollback, self.paths.rollback_dir)

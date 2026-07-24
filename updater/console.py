@@ -28,6 +28,14 @@ def step(number: int, total: int, message: str) -> None:
     print(f"[{number}/{total}] {message}")
 
 
+def detail(message: str) -> None:
+    print(f"      {message}")
+
+
+def activity(message: str) -> None:
+    print(f"[...] {message}")
+
+
 def wait_for_key(
     message: str = "Нажмите любую клавишу для выхода.",
     *,

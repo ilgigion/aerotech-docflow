@@ -24,8 +24,10 @@ def run() -> int:
         logger.info("Updater started")
         with single_instance():
             transaction = UpdateTransaction(paths, logger)
+            console.activity("Проверка незавершённого предыдущего обновления...")
             transaction.recover_interrupted_update()
-            prepared = transaction.prepare()
+            console.activity("Проверка/восстановление предыдущего обновления завершены.")
+            prepared = transaction.prepare(report=console.activity)
             console.ok(f"Установленная версия: {prepared.installed.version}")
             console.ok(f"Найден пакет: {prepared.package.zip_path.name}")
             console.ok(f"Версия пакета: {prepared.package.version.version}")
@@ -44,7 +46,11 @@ def run() -> int:
                 require_interactive=True,
             )
             print()
-            result = transaction.apply(prepared, progress=console.step)
+            result = transaction.apply(
+                prepared,
+                progress=console.step,
+                detail=console.detail,
+            )
             print()
             print("Обновление успешно установлено.")
             print(f"Версия: {result.installed_version}")

@@ -18,10 +18,9 @@ if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw "Run install-service.ps1 from an elevated PowerShell (Run as Administrator)."
 }
 
-$PackageRoot = Split-Path -Parent $PSScriptRoot
-$SourceDocflow = Join-Path $PackageRoot "app\aerotech-docflow.exe"
-$SourceWrapper = Join-Path $PackageRoot "service\docflow-service.exe"
-$SourceTemplate = Join-Path $PackageRoot "service\docflow-service.xml.template"
+$SourceDocflow = Join-Path $InstallDir "app\aerotech-docflow.exe"
+$SourceWrapper = Join-Path $InstallDir "service\docflow-service.exe"
+$SourceTemplate = Join-Path $InstallDir "service\docflow-service.xml.template"
 foreach ($Required in @($SourceDocflow, $SourceWrapper, $SourceTemplate, $ConfigPath)) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
         throw "Required file not found: $Required"
@@ -33,16 +32,7 @@ if ($ExistingService) {
     throw "AerotechDocflow service already exists. Uninstall it before installation or upgrade."
 }
 
-$ResolvedPackage = (Resolve-Path -LiteralPath $PackageRoot).Path.TrimEnd('\')
 $ResolvedInstall = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
-if ($ResolvedPackage -ne $ResolvedInstall) {
-    if ((Test-Path -LiteralPath $ResolvedInstall -PathType Container) -and
-        (Get-ChildItem -LiteralPath $ResolvedInstall -Force | Select-Object -First 1)) {
-        throw "Install directory is not empty: $ResolvedInstall. Use an empty directory to avoid mixing application versions."
-    }
-    New-Item -ItemType Directory -Path $ResolvedInstall -Force | Out-Null
-    Copy-Item -Path (Join-Path $ResolvedPackage "*") -Destination $ResolvedInstall -Recurse -Force
-}
 
 $AppDir = Join-Path $ResolvedInstall "app"
 $ServiceDir = Join-Path $ResolvedInstall "service"

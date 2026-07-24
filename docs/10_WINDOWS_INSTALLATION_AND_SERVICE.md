@@ -200,7 +200,7 @@ LocalService или другим пользователем может его н
 выделенную учётную запись и передаёт пароль непосредственно Windows Service
 Control Manager через WinSW; пароль в XML не записывается.
 
-## 6. Сборка aerotech-docflow.exe
+## 6. Сборка ZIP-релиза
 
 Сборка выполняется на Windows той же архитектуры, на которой будет работать
 приложение.
@@ -212,38 +212,31 @@ python -m pip install --upgrade pip
 pip install -r requirements-build.txt
 ```
 
-Скачайте проверенный WinSW с официального release и сохраните локально. Для
-режима `ServiceAccountMode Prompt` нужен WinSW 3 с поддержкой `<prompt>`;
-встроенные учётные записи работают и без интерактивного запроса. Затем:
+Скачайте проверенный WinSW с официального release и сохраните локально. Затем:
 
 ```powershell
-.\packaging\build_windows.ps1 `
+.\scripts\build_release.ps1 `
+  -Version "1.3.0" `
+  -ConfigSchema 2 `
   -Python ".\.venv-build\Scripts\python.exe" `
-  -WinSWPath "C:\Downloads\WinSW-x64.exe" `
-  -Clean
+  -WinSWPath "C:\Downloads\WinSW-x64.exe"
 ```
 
 Результат:
 
 ```text
-dist\AerotechDocflow\
-  app\
-    aerotech-docflow.exe
-    _internal\
-  config\
-    config.example.toml
-  service\
-    docflow-service.exe
-    docflow-service.xml.template
-    install-service.ps1
-    uninstall-service.ps1
-    WinSW.sha256
-  docs\
-    INSTALLATION.md
-  build-manifest.json
-  common_paths.ps1
-  update.ps1
-  update-helper.ps1
+dist\aerotech-docflow-v1.3.0.zip
+
+ZIP:
+
+app\
+  aerotech-docflow.exe
+  _internal\
+service\
+  docflow-service.exe
+  docflow-service.xml.template
+version.json
+build-manifest.json
 ```
 
 Build-скрипт:
@@ -251,29 +244,28 @@ Build-скрипт:
 - создаёт PyInstaller `onedir`-сборку;
 - отключает UPX;
 - добавляет WinSW под именем `docflow-service.exe`;
-- сохраняет SHA-256 WinSW;
 - формирует `build-manifest.json` с размером и SHA-256 каждого файла;
-- создаёт `dist\dist.zip` и `dist\dist.zip.sha256` для GitHub Release;
-- добавляет автономный загрузчик обновления и rollback-helper;
-- добавляет конфиг-пример, service scripts и этот документ.
+- создаёт один ZIP фиксированного формата;
+- повторно валидирует готовый ZIP;
+- выводит SHA-256 ZIP в консоль.
 
-Если `-WinSWPath` не передан, EXE всё равно собирается, но установить службу
-будет нельзя.
+Updater, конфиги, документация и PowerShell update-скрипты в ZIP не входят.
 
 ## 7. Проверка пакета до установки
 
-На тестовом компьютере:
+Распакуйте ZIP в отдельную тестовую папку и используйте отдельный тестовый TOML:
 
 ```powershell
-cd .\dist\AerotechDocflow
-.\app\aerotech-docflow.exe --config .\config\config.example.toml show-config
+Expand-Archive .\dist\aerotech-docflow-v1.3.0.zip C:\Temp\DocflowRelease
+& C:\Temp\DocflowRelease\app\aerotech-docflow.exe `
+  --config "C:\Temp\Docflow\config.toml" show-config
 ```
 
 Затем создайте отдельный development TOML с тестовым архивом и выполните:
 
 ```powershell
-.\app\aerotech-docflow.exe --config "C:\Temp\Docflow\config.toml" preflight
-.\app\aerotech-docflow.exe --config "C:\Temp\Docflow\config.toml" run
+& C:\Temp\DocflowRelease\app\aerotech-docflow.exe `
+  --config "C:\Temp\Docflow\config.toml" preflight
 ```
 
 В другом терминале:
@@ -284,38 +276,29 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 
 Перед production требуется новый приёмочный прогон именно собранного пакета.
 
-## 8. Установка Windows-службы
+## 8. Первоначальная установка Windows-службы
 
-Скопируйте весь `dist\AerotechDocflow` на целевой компьютер. Создайте production
-TOML и успешно выполните preflight. Затем откройте PowerShell от имени
-администратора:
+Публичный release ZIP предназначен для стандартизированных обновлений и не
+содержит установочные скрипты. Первоначальная установка остаётся контролируемой
+административной операцией из доверенной копии исходного проекта. Используйте
+внутренний `packaging\install_current_machine.ps1`, затем:
 
 ```powershell
-cd C:\Temp\AerotechDocflow
+cd C:\path\to\aerotech-docflow
 
-.\service\install-service.ps1 `
+.\packaging\service\install-service.ps1 `
   -InstallDir "C:\Program Files\Aerotech Docflow" `
   -ConfigPath "C:\ProgramData\Aerotech Docflow\config\config.toml" `
   -ServiceAccountMode Prompt `
   -StartService
 ```
 
-Если Windows пометила скачанный ZIP и блокирует локальные `.ps1`, сначала после
-проверки источника и SHA-256 снимите downloaded-file marker только с файлов
-пакета:
-
-```powershell
-Get-ChildItem C:\Temp\AerotechDocflow -Recurse -File | Unblock-File
-```
-
-Не меняйте системную Execution Policy целиком ради установки.
-
-Скрипт:
+Внутренний скрипт:
 
 1. проверяет запуск от администратора;
 2. проверяет наличие EXE, WinSW, шаблона и TOML;
 3. отказывается перезаписывать существующую службу;
-4. копирует пакет в `Program Files`;
+4. использует заранее установленную программную часть в `Program Files`;
 5. генерирует WinSW XML с абсолютными путями;
 6. выполняет production preflight;
 7. только после успешного preflight регистрирует службу;
@@ -342,6 +325,7 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 ```text
 C:\ProgramData\Aerotech Docflow\logs\
   docflow_YYYY_MM.txt
+  updater.log
 
 C:\ProgramData\Aerotech Docflow\service-logs\
   docflow-service.out.log
@@ -355,31 +339,25 @@ Application log связывает `task_id`, `operation_id`, idempotency key и
 
 ## 10. Обновление
 
-1. Соберите новую версию и сохраните build manifest.
-2. Проведите тесты и приёмку.
-3. Сделайте резервную копию текущего `Program Files` и TOML.
-4. Остановите службу:
+1. Один раз установите `AerotechUpdaterSetup.exe`.
+2. Скачайте ZIP-релиз вручную.
+3. Положите его без распаковки в `C:\Temp\Aerotech Docflow`.
+4. Закройте NAPS2.
+5. Запустите ярлык `Обновить Aerotech Docflow`.
+6. Прочитайте результаты проверок и нажмите клавишу.
+7. Дождитесь сообщения об успехе либо автоматическом откате.
 
-```powershell
-& "C:\Program Files\Aerotech Docflow\service\docflow-service.exe" stop
-```
-
-5. Убедитесь, что нет активного NAPS2 и `.scanner.lock`.
-6. Замените только каталоги `app`, `service`, `docs` и build manifest в
-   `Program Files`. Не копируйте пример поверх рабочего TOML.
-7. Не удаляйте TOML, logs, incoming, idempotency и архив.
-8. Выполните preflight новым EXE.
-9. Запустите службу и проверьте `/health`.
-
-Если новая версия не проходит preflight, служба не должна запускаться; верните
-предыдущий каталог программы.
+Updater не скачивает файлы, повторно проверяет NAPS2 и `.scanner.lock` после
+подтверждения, сохраняет `ProgramData` и проверяет новую службу через `/health`.
+Полный алгоритм: [guide/10_UPDATE_AND_ROLLBACK.md](guide/10_UPDATE_AND_ROLLBACK.md).
 
 ## 11. Удаление службы
 
 Из elevated PowerShell:
 
 ```powershell
-& "C:\Program Files\Aerotech Docflow\service\uninstall-service.ps1"
+cd "C:\path\to\aerotech-docflow"
+.\packaging\service\uninstall-service.ps1
 ```
 
 Скрипт останавливает и снимает регистрацию службы, но намеренно не удаляет:

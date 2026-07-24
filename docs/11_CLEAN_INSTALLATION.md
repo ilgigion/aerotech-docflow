@@ -1,181 +1,142 @@
 # Чистая установка Aerotech Docflow
 
-Все машинные значения задаются перед установкой в
-`config\config.production.toml`. Например:
+Этот документ описывает первоначальную административную установку. Обычные
+последующие обновления выполняются отдельным Aerotech Updater.
+
+## 1. Подготовьте зависимости
+
+Установите драйвер сканера, NAPS2 и WinSW. Под будущей учётной записью службы
+создайте и физически проверьте профиль NAPS2.
+
+## 2. Соберите или получите release ZIP
 
 ```text
-архив      D:\REPLACE_WITH_ARCHIVE_ROOT
-incoming   C:\ProgramData\Aerotech Docflow\incoming
-NAPS2      C:\Program Files\NAPS2\NAPS2.Console.exe
-профиль    MY_NAPS2_PROFILE
-API        http://127.0.0.1:8000
+aerotech-docflow-v1.3.0.zip
 ```
 
-Сначала приложение устанавливается без Windows-службы. Оно запускается под
-текущим пользователем и поэтому видит существующий профиль NAPS2. Настройка
-службы выполняется позже, когда будет создана отдельная служебная учётная
-запись с паролем.
+ZIP содержит только `app`, `service`, `version.json` и
+`build-manifest.json`. Конфиг и установочные скрипты в него не входят.
 
-## Шаг 1. Откройте новый пакет
-
-Пакет находится здесь:
-
-```text
-C:\path\to\aerotech-docflow\dist\AerotechDocflow
-```
-
-Не копируйте отдельные файлы из старых каталогов. Все команды ниже выполняются
-из нового пакета.
-
-## Шаг 2. Удалите предыдущую неоконченную установку
-
-Откройте **Windows PowerShell от имени администратора** и выполните:
+Распакуйте ZIP:
 
 ```powershell
-cd "C:\path\to\aerotech-docflow\dist\AerotechDocflow"
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\cleanup_previous_install.ps1
+Expand-Archive `
+  "C:\Downloads\aerotech-docflow-v1.3.0.zip" `
+  "C:\Temp\AerotechDocflowRelease"
 ```
 
-Скрипт удаляет только:
+Не смешивайте файлы разных версий.
 
-- службу `AerotechDocflow`;
-- `C:\Program Files\Aerotech Docflow`;
-- `C:\ProgramData\Aerotech Docflow`.
+## 3. Создайте машинный конфиг
 
-Он не изменяет архивные корни, PDF или marker-файлы независимо от путей и
-`archive_id`.
-
-Ожидаемый конец вывода:
-
-```text
-PREVIOUS INSTALLATION REMOVED
-All archives were preserved.
-```
-
-Если написано, что служба помечена для удаления, перезагрузите Windows и снова
-выполните этот шаг.
-
-## Шаг 3. Проверьте архив перед привязкой
-
-Откройте `config\config.production.toml`, возьмите значение `archive.root` и
-проверьте именно этот каталог через `Get-Item`/`Get-ChildItem`.
-
-Убедитесь, что это нужный архив. Установочный скрипт не создаёт корень архива и
-не удаляет существующие PDF.
-
-## Шаг 4. Установите программу
-
-В том же elevated PowerShell:
+Скопируйте обезличенный шаблон из исходного проекта в закрытый локальный путь:
 
 ```powershell
-.\install_current_machine.ps1 -ConfirmArchive
+New-Item -ItemType Directory "C:\Secure\AerotechDocflow" -Force
+Copy-Item `
+  "C:\path\to\aerotech-docflow\packaging\config.production.example.toml" `
+  "C:\Secure\AerotechDocflow\config.toml"
+notepad "C:\Secure\AerotechDocflow\config.toml"
 ```
 
-Сначала отредактируйте `config\config.production.toml`. Все перечисленные ниже
-пути берутся из него, а не из установочного сценария. Затем запустите установку.
+Заполните NAPS2, incoming, archive root/confirmation, `archive_id`, типы
+документов, логи и idempotency. Корень архива должен уже существовать.
 
-Скрипт:
+## 4. Установите программную часть
 
-1. проверит NAPS2 и `archive.root` из TOML;
-2. создаст `scanner.incoming_dir` из TOML;
-3. создаст каталоги в `ProgramData`;
-4. скопирует приложение в `Program Files`;
-5. установит готовый production `config.toml`;
-6. создаст marker с `archive_id` из TOML, если marker ещё отсутствует;
-7. выполнит preflight без запуска сканера.
+Откройте Windows PowerShell от имени администратора в доверенной копии исходного
+проекта:
 
-Ожидаемый результат:
+```powershell
+cd "C:\path\to\aerotech-docflow"
+
+.\packaging\install_current_machine.ps1 `
+  -PackageRoot "C:\Temp\AerotechDocflowRelease" `
+  -ConfigSource "C:\Secure\AerotechDocflow\config.toml" `
+  -ConfirmArchive
+```
+
+Скрипт проверяет manifest release, конфиг, NAPS2, identity архива и выполняет
+preflight. Он не запускает физический скан.
+
+Ожидаемый итог:
 
 ```text
-"status": "ok"
-"environment": "production"
-"archive_root": "D:\\Archive"
 INSTALLATION FILES READY
 No Windows service was created.
 ```
 
-## Шаг 5. Запустите приложение вручную
+## 5. Ручная проверка
 
-Закройте elevated PowerShell. Откройте обычный PowerShell от пользователя,
-который видит профиль NAPS2, и выполните:
+Под пользователем с профилем NAPS2:
 
 ```powershell
-& "C:\Program Files\Aerotech Docflow\start-manually.ps1"
+& "C:\Program Files\Aerotech Docflow\app\aerotech-docflow.exe" `
+  --config "C:\ProgramData\Aerotech Docflow\config\config.toml" `
+  run
 ```
 
-Оставьте это окно открытым. Нормальный вывод содержит:
-
-```text
-Uvicorn running on http://127.0.0.1:8000
-```
-
-## Шаг 6. Проверьте API без сканирования
-
-Откройте второй обычный PowerShell:
+В другом окне:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health
 ```
 
-Ожидается:
+Проведите один физический тест на тестовом документе и тестовом архиве. Затем
+остановите ручной сервер через `Ctrl+C`.
 
-```text
-status  : ok
-service : aerotech-docflow
-```
-
-Проверка `/health` не запускает сканер.
-
-## Шаг 7. Проведите один тестовый скан
-
-Перед тестом:
-
-1. используйте тестовый документ;
-2. выключите VPN;
-3. убедитесь, что в автоподатчике находится только этот документ;
-4. сохраните список или SHA-256 существующих PDF.
-
-Пример запроса:
+## 6. Установите Windows-службу
 
 ```powershell
-$body = @{
-    task_id = "INSTALL-TEST-001"
-    doc_type = "НКЛ"
-    document_number = "INSTALL-001"
-    scanner_profile = "MY_NAPS2_PROFILE"
-    idempotency_key = "install_test_001"
-} | ConvertTo-Json
+cd "C:\path\to\aerotech-docflow"
 
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:8000/scan" `
-  -ContentType "application/json" `
-  -Body $body
+.\packaging\service\install-service.ps1 `
+  -InstallDir "C:\Program Files\Aerotech Docflow" `
+  -ConfigPath "C:\ProgramData\Aerotech Docflow\config\config.toml" `
+  -ServiceAccountMode Prompt `
+  -StartService
 ```
 
-Проверьте, что создан ровно один открывающийся PDF и существующие файлы не
-изменены.
+Укажите обычный пароль Windows-пользователя с настроенным профилем NAPS2, а не
+PIN Windows Hello.
 
-## Шаг 8. Остановка программы
+Проверка:
 
-В окне с сервером нажмите `Ctrl+C`. После этого `/health` станет недоступен —
-это нормально для ручного режима.
+```powershell
+Get-Service AerotechDocflow
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
 
-## Windows-служба
+## 7. Установите постоянный updater
 
-На первом этапе службу не устанавливайте. PIN Windows Hello нельзя использовать
-как пароль службы. Для постоянной работы сначала создайте отдельного локального
-пользователя с паролем, настройте под ним NAPS2 и повторите аппаратную проверку.
-Только после этого используйте `service\install-service.ps1`.
-
-## Где находятся рабочие файлы
+Запустите от администратора:
 
 ```text
-C:\Program Files\Aerotech Docflow\                программа
-C:\ProgramData\Aerotech Docflow\config\config.toml
-C:\ProgramData\Aerotech Docflow\logs\             application logs
-C:\ProgramData\Aerotech Docflow\data\idempotency\
-C:\ProgramData\Aerotech Docflow\incoming\          временные сканы и lock
-D:\REPLACE_WITH_ARCHIVE_ROOT\                        архив PDF
+AerotechUpdaterSetup.exe
 ```
+
+Setup создаст:
+
+```text
+C:\Program Files\Aerotech Updater\AerotechUpdater.exe
+C:\Users\Public\Desktop\Обновить Aerotech Docflow.lnk
+C:\Temp\Aerotech Docflow\
+```
+
+Setup не заменяет рабочий `config.toml`. Если версию старой установки нельзя
+подтвердить однозначно, он остановится с `LEGACY_VERSION_UNKNOWN`.
+
+## 8. Рабочие пути
+
+```text
+C:\Program Files\Aerotech Docflow\                 приложение
+C:\Program Files\Aerotech Updater\                 постоянный updater
+C:\ProgramData\Aerotech Docflow\config\config.toml рабочий конфиг
+C:\ProgramData\Aerotech Docflow\incoming\          сканы и lock
+C:\ProgramData\Aerotech Docflow\logs\              логи
+C:\Temp\Aerotech Docflow\                           ZIP обновлений
+<ARCHIVE_ROOT>\                                      архив PDF
+```
+
+Updater может дописывать только `logs\updater.log` внутри ProgramData и не
+изменяет конфиг, incoming, state или архив.

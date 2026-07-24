@@ -26,6 +26,7 @@ NAPS2 / выбранный профиль сканера
 - файловая идемпотентность без SQLite;
 - месячные TXT-логи;
 - диагностика восстановления после сбоев;
+- автономный постоянный Windows-updater с manifest, health-check и rollback;
 - unit-тесты без физического сканера;
 - manual-тесты для Epson/NAPS2.
 
@@ -55,6 +56,20 @@ CLI, PyInstaller `onedir`-сборка и запуск через WinSW как W
 Полная инструкция: `docs/10_WINDOWS_INSTALLATION_AND_SERVICE.md`.
 Короткая чистая установка с удалением предыдущей попытки:
 `docs/11_CLEAN_INSTALLATION.md`.
+
+Release ZIP собирается одной командой и содержит только заменяемую программную
+часть:
+
+```powershell
+.\scripts\build_release.ps1 `
+  -Version "1.3.0" `
+  -ConfigSchema 2 `
+  -WinSWPath "C:\Tools\WinSW-x64.exe"
+```
+
+Постоянные `AerotechUpdater.exe` и `AerotechUpdaterSetup.exe` собираются отдельно
+через `scripts\build_updater.ps1`; updater не входит в ZIP приложения и не
+обращается к интернету.
 
 Основные команды из исходного кода:
 

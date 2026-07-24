@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import logging
-import os
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -11,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app import document_flow
+from app.build_info import get_application_version
 from app.naming import (
     normalize_doc_type,
     normalize_document_number,
@@ -31,7 +31,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-APP_VERSION = os.getenv("DOCFLOW_VERSION", "dev").strip() or "dev"
+APP_VERSION = get_application_version()
 
 
 app = FastAPI(

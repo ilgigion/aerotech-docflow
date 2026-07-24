@@ -33,6 +33,16 @@ Wrapper log объясняет установку, старт, logon failure и 
 Service Control Manager фиксирует ошибки учётной записи и запуска службы.
 Application code обычно ищется в application log, а не в Event Log.
 
+### Updater log
+
+```text
+C:\ProgramData\Aerotech Docflow\logs\updater.log
+```
+
+Содержит найденные версии, проверку ZIP/manifest, preflight, остановку и запуск
+службы, health-check и rollback. Это единственный файл внутри ProgramData,
+который разрешено создавать и дописывать постоянному updater.
+
 ## Основные идентификаторы
 
 | Идентификатор | Для чего используется |

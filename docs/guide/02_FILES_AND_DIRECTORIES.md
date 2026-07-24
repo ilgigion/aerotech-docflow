@@ -1,73 +1,94 @@
 # 2. Файлы и каталоги
 
-## Не путайте три представления программы
-
-### Исходный проект
+## Исходный проект
 
 ```text
 C:\path\to\aerotech-docflow\
 ```
 
-Здесь находятся Python-код, тесты, документация и сценарий сборки. Из этого
-каталога разрабатывают и собирают новую версию. Рабочая программа не должна
-зависеть от того, открыт ли этот проект в VS Code.
+Содержит Python-код, тесты, документацию, внутренние установочные инструменты и
+сценарии сборки. Установленная служба не зависит от этой папки.
 
-### Установочный пакет
-
-```text
-C:\path\to\aerotech-docflow\dist\AerotechDocflow\
-```
-
-Это переносимый результат PyInstaller. Он содержит EXE, внутренние библиотеки,
-WinSW, конфиги-примеры и установочные сценарии. Пакет можно скопировать на другой
-компьютер целиком.
-
-### Установленная программа
+## ZIP конкретной версии
 
 ```text
-C:\Program Files\Aerotech Docflow\
+dist\aerotech-docflow-v1.3.0.zip
 ```
 
-Это рабочая неизменяемая копия пакета. Её не нужно редактировать для смены
-сканера или архива: рабочие настройки находятся в `ProgramData`.
+Содержит только заменяемую программную часть:
 
-## Рекомендуемая production-структура
+```text
+app\
+  aerotech-docflow.exe
+  _internal\
+service\
+  docflow-service.exe
+  docflow-service.xml.template
+version.json
+build-manifest.json
+```
+
+В ZIP нет updater, конфигов, рабочих данных и установочных PowerShell-скриптов.
+
+## Установленное приложение
 
 ```text
 C:\Program Files\Aerotech Docflow\
   app\
-    aerotech-docflow.exe
-    _internal\
-  config\
-    config.example.toml
-    config.production.toml
-    config.production.example.toml
   service\
-    docflow-service.exe
-    docflow-service.xml.template
-  docs\
+  version.json
   build-manifest.json
-  common_paths.ps1
-  cleanup_previous_install.ps1
-  install_current_machine.ps1
-  start-manually.ps1
-  update.ps1
-  update-helper.ps1
+```
 
+Эта папка целиком заменяется при обновлении.
+
+## Постоянный updater
+
+```text
+C:\Program Files\Aerotech Updater\
+  AerotechUpdater.exe
+```
+
+Он устанавливается отдельным `AerotechUpdaterSetup.exe`, не находится внутри
+Docflow и не заменяется вместе с ним.
+
+## Постоянные рабочие данные
+
+```text
 C:\ProgramData\Aerotech Docflow\
   config\
     config.toml
+  incoming\
+    .scanner.lock
+    PF_*.pdf
+    _failed_runtime\
   logs\
     docflow_YYYY_MM.txt
+    updater.log
   service-logs\
+  state\
   data\
     idempotency\
+```
 
-C:\ProgramData\Aerotech Docflow\incoming\
-  .scanner.lock
-  PF_*.pdf
-  _failed_runtime\
+Updater может дописывать только `logs\updater.log`. Остальные постоянные данные
+он не изменяет.
 
+## Временные данные обновления
+
+```text
+C:\Temp\Aerotech Docflow\
+  aerotech-docflow-v1.3.0.zip
+  unpacked\
+  rollback\
+```
+
+После успешного обновления ZIP, `unpacked` и `rollback` удаляются. При ошибке ZIP
+остаётся для диагностики.
+
+## Архив документов
+
+```text
 D:\REPLACE_WITH_ARCHIVE_ROOT\
   .aerotech-docflow-archive.json
   2026\
@@ -75,43 +96,25 @@ D:\REPLACE_WITH_ARCHIVE_ROOT\
     УПД\
 ```
 
-## Назначение рабочих файлов
+Updater не обращается к PDF и не перемещает архив. `preflight` только проверяет
+уже настроенный архив по рабочему `config.toml`.
 
-| Файл или каталог | Назначение | Можно удалять вручную? |
+## Назначение критических файлов
+
+| Файл | Назначение | Правило |
 |---|---|---|
-| `config.toml` | Рабочая конфигурация компьютера | Только с резервной копией и при остановленной программе |
-| `config.example.toml` | Учебный development-пример | Да, но он нужен для справки и сборки |
-| `config.production.example.toml` | Неизменённый обезличенный production-шаблон | Да, но он нужен для сравнения и восстановления настроек |
-| `.aerotech-docflow-archive.json` | Подтверждает identity выбранного архива | Нет во время эксплуатации |
-| `.scanner.lock` | Запрещает параллельный физический скан | Только после диагностики владельца |
-| `PF_*.pdf` | Временный валидный скан или аварийно сохранённый исходник | Нет, пока не проверена идемпотентность |
-| `_failed_runtime` | Карантин недоверенных частичных PDF | После ручной проверки и по процедуре хранения |
-| `*.reserve` | Резервирование конкретного финального имени | Только автоматическим recovery после stale-проверки |
-| `*.tmp` в архиве | Незавершённая или проверяемая копия | Только после диагностики ownership/возраста |
-| JSON в `idempotency` | История и состояние запросов | Не удалять для «повторного скана» |
-| `docflow_YYYY_MM.txt` | Основной application log | Архивировать по политике хранения |
-| `build-manifest.json` | SHA-256 файлов установочного пакета | Нет, нужен для проверки обновлений |
-
-## Что принадлежит архиву
-
-Архивом считается только корень, указанный одновременно в:
-
-- `archive.root`;
-- `archive.confirmation`;
-- marker-файле с совпадающим `archive_id`.
-
-Логи, конфигурация, incoming и idempotency должны находиться вне архива.
-Production preflight отклоняет вложенное размещение служебных каталогов.
+| `config.toml` | Рабочая конфигурация компьютера | Updater только читает |
+| `version.json` | Версия программы и схема конфига | Заменяется вместе с приложением |
+| `build-manifest.json` | Размеры и SHA-256 релиза | Нужен для проверки ZIP |
+| `.scanner.lock` | Запрет параллельного скана | Updater не удаляет |
+| `updater.log` | История обновлений | Единственная запись updater в ProgramData |
+| `.aerotech-docflow-archive.json` | Identity архива | Updater не изменяет |
+| `*.reserve`, `*.tmp` | Защита публикации PDF | Не удалять вручную без диагностики |
 
 ## Что резервировать
 
-Минимальный резервный набор администратора:
-
 1. `C:\ProgramData\Aerotech Docflow\config\config.toml`;
-2. `C:\ProgramData\Aerotech Docflow\data\idempotency`;
-3. application logs;
-4. `build-manifest.json` установленной версии;
-5. сам архив по корпоративной политике.
-
-Не восстанавливайте idempotency JSON от другой версии или другого архива без
-проверки абсолютных путей и `archive_id`.
+2. idempotency/state;
+3. application, service и updater logs;
+4. `version.json` и `build-manifest.json` установленной версии;
+5. архив по корпоративной политике.

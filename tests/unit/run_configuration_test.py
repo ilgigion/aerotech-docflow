@@ -236,13 +236,17 @@ stable_interval_seconds = 0.2
     cleanup = (project_root / "packaging" / "cleanup_previous_install.ps1").read_text(
         encoding="utf-8"
     )
-    updater = (project_root / "packaging" / "update.ps1").read_text(
+    updater = (project_root / "updater" / "main.py").read_text(encoding="utf-8")
+    update_transaction = (project_root / "updater" / "transaction.py").read_text(
         encoding="utf-8"
     )
-    update_helper = (project_root / "packaging" / "update-helper.ps1").read_text(
+    update_package = (project_root / "updater" / "package.py").read_text(
         encoding="utf-8"
     )
-    build_script = (project_root / "packaging" / "build_windows.ps1").read_text(
+    update_windows = (project_root / "updater" / "windows.py").read_text(
+        encoding="utf-8"
+    )
+    build_script = (project_root / "scripts" / "build_release.ps1").read_text(
         encoding="utf-8"
     )
     production_template = (
@@ -255,8 +259,6 @@ stable_interval_seconds = 0.2
         project_root / "packaging" / "install_current_machine.ps1",
         project_root / "packaging" / "cleanup_previous_install.ps1",
         project_root / "packaging" / "start-manually.ps1",
-        project_root / "packaging" / "update.ps1",
-        project_root / "packaging" / "update-helper.ps1",
         project_root / "packaging" / "service" / "install-service.ps1",
         project_root / "packaging" / "service" / "uninstall-service.ps1",
     ]
@@ -265,44 +267,36 @@ stable_interval_seconds = 0.2
     assert "REPLACE_WITH_UNIQUE_ARCHIVE_ID" not in installer
     assert "effective_environment" in installer
     assert "show-config --ascii" in installer
-    assert "packaging\\config.production.example.toml" in build_script
-    assert "packaging\\config.production.toml" not in build_script
+    assert "config.production" not in build_script
     assert "REPLACE_WITH_NAPS2_PROFILE_NAME" in production_template
     assert "REPLACE_WITH_ARCHIVE_ROOT" in production_template
     assert "REPLACE_WITH_UNIQUE_ARCHIVE_ID" in production_template
     assert "Remove-Item -LiteralPath $Marker" not in cleanup
-    assert "Invoke-WebRequest" in updater
-    assert "AerotechDocflow-update-" in updater
-    assert "Expand-ZipSafely" in updater
-    assert "Assert-DocflowPackageManifest $PackageRoot" in updater
-    assert "Start-Process" in updater and "-ParentProcessId" in updater
-    assert "helper.ready" in updater and "helper.ready" in update_helper
-    assert "Run the installed updater only from" in updater
-    assert update_helper.count("Assert-NoScannerActivity $ScannerLock") == 2
-    assert update_helper.index("Assert-NoScannerActivity $ScannerLock") < update_helper.index(
-        "$ShutdownStarted = $true"
-    ) < update_helper.index("Stop-InstalledRuntime $InstallDir")
-    assert "Stop-InstalledRuntime $InstallDir" in update_helper
-    assert '$RollbackDir = "$InstallDir.rollback"' in update_helper
-    assert "Remove-PreviousUpdateDirectories $InstallDir" in update_helper
-    assert "Move-Item -LiteralPath $InstallDir -Destination $RollbackDir" in update_helper
-    assert "Move-Item -LiteralPath $RollbackDir -Destination $InstallDir" in update_helper
-    assert "Start-AndVerifyRuntime $InstallDir $ServiceInstalled" in update_helper
-    assert "Wait-LocalHealth" in update_helper
-    assert "Remove-TemporaryUpdateDirectory" in update_helper
-    assert "docflow-service.xml" in update_helper
-    assert "before-update" not in update_helper
-    assert "Copy-Item -LiteralPath $ConfigPath" not in update_helper
-    assert "Remove-Item -LiteralPath $ConfigPath" not in update_helper
-    assert '"packaging\\update.ps1"' in build_script
-    assert '"packaging\\update-helper.ps1"' in build_script
-    assert '"dist.zip"' in build_script
+    assert "Invoke-WebRequest" not in updater
+    assert "github.com" not in updater.lower()
+    assert "validate_package" in update_package
+    assert "build-manifest.json" in update_package
+    assert "assert_scanner_idle(prepared.incoming)" in update_transaction
+    assert update_transaction.count("assert_scanner_idle(prepared.incoming)") == 2
+    assert "stop_service()" in update_transaction
+    assert "rollback" in update_transaction
+    assert "wait_health" in update_transaction
+    assert "docflow-service.xml" in update_transaction
+    assert "config_path.unlink" not in update_transaction
+    assert "config_path.write" not in update_transaction
+    assert '"app"' in build_script and '"service"' in build_script
+    assert "version.json" in build_script
+    assert "build-manifest.json" in build_script
+    assert "update.ps1" not in build_script
+    assert "AerotechUpdater" not in build_script
     assert not (project_root / "packaging" / "update_current_machine.ps1").exists()
-    assert '"packaging\\common_paths.ps1"' in build_script
+    assert not (project_root / "packaging" / "update.ps1").exists()
+    assert not (project_root / "packaging" / "update-helper.ps1").exists()
+    assert not (project_root / "packaging" / "build_windows.ps1").exists()
     assert '"ProgramW6432"' in common_paths
     assert '"ProgramFiles(x86)"' in common_paths
-    assert "Assert-CanonicalDocflowInstallDirectory" in update_helper
-    assert "Assert-NoLegacyX86DocflowInstallation" in updater
+    assert "ProgramW6432" in update_windows
+    assert "Program Files (x86)" in update_windows
     for script_path in packaging_scripts:
         assert "$env:ProgramFiles" not in script_path.read_text(encoding="utf-8")
 

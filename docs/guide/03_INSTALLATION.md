@@ -25,35 +25,28 @@ WinSW нужен только для необязательного запуск
    `%APPDATA%\NAPS2\profiles.xml`;
 5. закройте NAPS2 перед запуском Docflow.
 
-## Установка текущего готового пакета
+## Первоначальная установка приложения
 
-Готовый пакет находится в:
+Публичный release является ZIP фиксированного формата:
 
 ```text
-C:\path\to\aerotech-docflow\dist\AerotechDocflow
+C:\path\to\aerotech-docflow\dist\aerotech-docflow-v1.3.0.zip
 ```
 
-Откройте PowerShell через **Запуск от имени администратора**:
+Он не содержит конфиг и установочные PowerShell-скрипты. Первоначальную
+установку выполняет администратор из доверенной копии исходного проекта.
+Распакуйте ZIP:
 
 ```powershell
-cd "C:\path\to\aerotech-docflow\dist\AerotechDocflow"
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+Expand-Archive `
+  "C:\path\to\aerotech-docflow\dist\aerotech-docflow-v1.3.0.zip" `
+  "C:\Temp\AerotechDocflowRelease"
 ```
 
-Если на компьютере была предыдущая попытка установки:
+Создайте отдельный проверенный машинный конфиг вне release ZIP, например:
 
 ```powershell
-.\cleanup_previous_install.ps1
-```
-
-Скрипт удаляет только старую службу, приложение и `ProgramData`. Он не изменяет
-корни архивов, PDF или archive marker. Если служба помечена
-для удаления, перезагрузите Windows и повторите cleanup.
-
-Перед установкой откройте единственный машинный конфиг пакета:
-
-```powershell
-notepad ".\config\config.production.toml"
+C:\Secure\AerotechDocflow\config.toml
 ```
 
 Укажите в нём NAPS2/profile, incoming, archive root и confirmation, уникальный
@@ -64,7 +57,11 @@ archive_id, logs, idempotency и остальные настройки. Зате
 Установите программу:
 
 ```powershell
-.\install_current_machine.ps1 -ConfirmArchive
+cd "C:\path\to\aerotech-docflow"
+.\packaging\install_current_machine.ps1 `
+  -PackageRoot "C:\Temp\AerotechDocflowRelease" `
+  -ConfigSource "C:\Secure\AerotechDocflow\config.toml" `
+  -ConfirmArchive
 ```
 
 Сценарий создаёт каталоги incoming/log/idempotency из TOML, копирует программу
@@ -99,11 +96,12 @@ Test-Path "C:\ProgramData\Aerotech Docflow\config\config.toml"
 
 ## Первый запуск
 
-Закройте административный PowerShell. Под пользователем, который создал профиль
-NAPS2, выполните:
+Под пользователем, который создал профиль NAPS2, выполните:
 
 ```powershell
-& "C:\Program Files\Aerotech Docflow\start-manually.ps1"
+& "C:\Program Files\Aerotech Docflow\app\aerotech-docflow.exe" `
+  --config "C:\ProgramData\Aerotech Docflow\config\config.toml" `
+  run
 ```
 
 Оставьте окно открытым. В другом терминале:
@@ -118,11 +116,11 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 ## Установка на другой компьютер
 
 Сценарий `install_current_machine.ps1` использует пути только из переданного
-production TOML. Для другого устройства:
+машинного TOML. Для другого устройства:
 
-1. скопируйте пакет целиком;
-2. отредактируйте `config\config.production.toml` либо создайте машинный TOML;
-3. при отдельном TOML передайте `-ConfigSource "C:\path\config.toml"`;
+1. скопируйте release ZIP и распакуйте его;
+2. создайте отдельный машинный TOML;
+3. передайте `-PackageRoot` и `-ConfigSource` внутреннему установщику;
 4. установщик проверит root, identity marker и выполнит preflight;
 5. сначала запускайте программу вручную;
 6. только после аппаратной приёмки решайте вопрос Windows-службы.

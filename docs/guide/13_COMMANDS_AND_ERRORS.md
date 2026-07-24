@@ -158,6 +158,21 @@ run          запустить FastAPI
 
 ## Частые error codes
 
+Коды автономного updater:
+
+| Код | Значение |
+|---|---|
+| `PACKAGE_NOT_FOUND` | В `C:\Temp\Aerotech Docflow` нет новой корректной версии |
+| `CONFIG_SCHEMA_MISMATCH` | Пакет требует другую схему рабочего конфига |
+| `SCANNER_ACTIVE` | Запущен NAPS2 или существует `.scanner.lock` |
+| `PREFLIGHT_FAILED` | Новый EXE не прошёл проверку текущего конфига |
+| `POST_INSTALL_HEALTH_FAILED` | Новая служба не подтвердила версию и состояние |
+| `ROLLBACK_FAILED` | Не удалось автоматически вернуть старую службу |
+| `LEGACY_VERSION_UNKNOWN` | Setup не смог однозначно определить старую версию |
+
+Подробности всегда сохраняются в
+`C:\ProgramData\Aerotech Docflow\logs\updater.log`.
+
 | `error_code` | HTTP | Что означает | Первое действие |
 |---|---:|---|---|
 | `validation_error` | 422 | неверный JSON или реквизиты | исправить запрос, скан не запускался |

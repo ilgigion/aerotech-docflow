@@ -1,4 +1,5 @@
 param(
+    [string]$PackageRoot = "",
     [string]$ConfigSource = "",
     [switch]$ConfirmArchive
 )
@@ -13,12 +14,15 @@ if (-not $ConfirmArchive) {
     throw "Review the archive path in config.production.toml and rerun with -ConfirmArchive."
 }
 
-$PackageRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
+    throw "Specify -PackageRoot pointing to an extracted Aerotech Docflow release ZIP."
+}
+$PackageRoot = [IO.Path]::GetFullPath($PackageRoot).TrimEnd('\')
 $InstallDir = Get-CanonicalDocflowInstallDirectory
 Assert-NoLegacyX86DocflowInstallation
 $DataRoot = Join-Path $env:ProgramData "Aerotech Docflow"
 if (-not $ConfigSource) {
-    $ConfigSource = Join-Path $PackageRoot "config\config.production.toml"
+    throw "Specify -ConfigSource pointing to the reviewed machine config.toml."
 }
 $ConfigSource = [IO.Path]::GetFullPath($ConfigSource)
 $ConfigTarget = Join-Path $DataRoot "config\config.toml"
@@ -26,12 +30,15 @@ $SourceExecutable = Join-Path $PackageRoot "app\aerotech-docflow.exe"
 
 foreach ($RequiredFile in @(
     $SourceExecutable,
-    $ConfigSource
+    $ConfigSource,
+    (Join-Path $PackageRoot "version.json"),
+    (Join-Path $PackageRoot "build-manifest.json")
 )) {
     if (-not (Test-Path -LiteralPath $RequiredFile -PathType Leaf)) {
         throw "Required file not found: $RequiredFile"
     }
 }
+Assert-DocflowPackageManifest $PackageRoot
 
 $ConfigReportText = & $SourceExecutable --config $ConfigSource show-config --ascii | Out-String
 if ($LASTEXITCODE -ne 0) {
@@ -129,4 +136,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "INSTALLATION FILES READY"
 Write-Host "No Windows service was created."
-Write-Host "Next run: $InstallDir\start-manually.ps1"
+Write-Host "Manual run: & `"$InstallDir\app\aerotech-docflow.exe`" --config `"$ConfigTarget`" run"

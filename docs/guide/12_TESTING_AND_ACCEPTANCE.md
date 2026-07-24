@@ -31,7 +31,7 @@ archive hardening, logging, cleanup и API.
 Проверьте manifest:
 
 ```powershell
-$package = "C:\path\to\aerotech-docflow\dist\AerotechDocflow"
+$package = "C:\Temp\AerotechDocflowRelease"
 $entries = Get-Content "$package\build-manifest.json" -Raw -Encoding UTF8 |
     ConvertFrom-Json
 
